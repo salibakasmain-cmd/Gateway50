@@ -1,6 +1,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <filesystem>
 #include <stdexcept>
