@@ -33,13 +33,14 @@ https://cdimages.ubuntu.com/ubuntu-base/releases/24.04/release/
 
 ## Node.js
 
-CARAVEL uses Hermes Agent's managed Node package manager inside Ubuntu and
-requests Node.js major version 22. The runtime performs an explicit post-install
-check that the managed binary reports `v22.x`.
+CARAVEL uses the official Hermes Agent Node bootstrap script from the pinned
+Hermes source revision inside Ubuntu and requests Node.js major version 22.
+The runtime performs an explicit post-install check that the managed binary
+reports `v22.x`.
 
 CARAVEL does not bundle a Node.js binary in the APK and does not claim a fixed
-Node.js patch-version hash here; the managed package is resolved at Hermes
-installation time.
+Node.js patch-version hash here; the upstream bootstrap resolves the current
+Node.js 22 release at Hermes installation time.
 
 ## Hermes Agent
 
