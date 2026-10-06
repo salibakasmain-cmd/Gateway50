@@ -337,7 +337,7 @@ public final class HermesManager {
 
         String command =
             "export HERMES_HOME=/root/.hermes; " +
-            "export PATH=/usr/local/lib/hermes-agent/venv/bin:" +
+            "export PATH=/root/.hermes/node/bin:/usr/local/lib/hermes-venv/bin:" +
             "/usr/local/bin:$PATH; " +
             "export HERMES_WEB_DIST=/root/.hermes/web_dist; " +
             "cd /root/workspace && " +
