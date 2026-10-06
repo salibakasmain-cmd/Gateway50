@@ -648,21 +648,19 @@ public final class HermesManager {
 
         pb.redirectErrorStream(true);
 
-        try {
-            Process process = pb.start();
-            int exit = waitAndDrain(
-                process,
-                null,
-                "Hermes extraction"
-            );
+        Process process = pb.start();
+        int exit = waitAndDrain(
+            process,
+            null,
+            "Hermes extraction"
+        );
 
-            if (exit != 0) {
-                throw new IOException(
-                    "Hermes extraction failed (exit " +
-                    exit +
-                    ")"
-                );
-            }
+        if (exit != 0) {
+            throw new IOException(
+                "Hermes extraction failed (exit " +
+                exit +
+                ")"
+            );
         }
     }
 
