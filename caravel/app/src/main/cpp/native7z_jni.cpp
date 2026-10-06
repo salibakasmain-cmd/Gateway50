@@ -17,7 +17,7 @@
 #include "bit7z/bitpropvariant.hpp"
 #include "internal/fsutil.hpp"
 
-namespace fs = std::filesystem;
+namespace stdfs = std::filesystem;
 
 namespace {
 
@@ -50,8 +50,8 @@ void throwIOException(JNIEnv* env, const std::string& message) noexcept {
 }
 
 bool isWithinBase(
-    const fs::path& candidate,
-    const fs::path& base
+    const stdfs::path& candidate,
+    const stdfs::path& base
 ) {
     const std::string baseText =
         base.generic_string();
@@ -68,15 +68,15 @@ bool isWithinBase(
          candidateText[baseText.size()] == '/');
 }
 
-fs::path safeArchivePath(
-    const fs::path& base,
+stdfs::path safeArchivePath(
+    const stdfs::path& base,
     const std::string& archivePath
 ) {
-    const fs::path root =
-        fs::absolute(base).lexically_normal();
+    const stdfs::path root =
+        stdfs::absolute(base).lexically_normal();
 
-    const fs::path candidate =
-        (root / fs::path(archivePath)).lexically_normal();
+    const stdfs::path candidate =
+        (root / stdfs::path(archivePath)).lexically_normal();
 
     if (!isWithinBase(candidate, root)) {
         throw std::runtime_error(
@@ -87,9 +87,9 @@ fs::path safeArchivePath(
     return candidate;
 }
 
-void removeExisting(const fs::path& path) {
+void removeExisting(const stdfs::path& path) {
     std::error_code ec;
-    fs::remove_all(path, ec);
+    stdfs::remove_all(path, ec);
 
     if (ec) {
         throw std::runtime_error(
@@ -103,14 +103,14 @@ void removeExisting(const fs::path& path) {
 
 void materializeSymlink(
     const bit7z::SafeOutPathBuilder& builder,
-    const fs::path& linkPath,
+    const stdfs::path& linkPath,
     const std::string& target
 ) {
-    const fs::path parent =
+    const stdfs::path parent =
         linkPath.parent_path();
 
     std::error_code ec;
-    fs::create_directories(parent, ec);
+    stdfs::create_directories(parent, ec);
 
     if (ec) {
         throw std::runtime_error(
@@ -243,8 +243,8 @@ void extractNative(
         }
     );
 
-    const fs::path destination =
-        fs::absolute(
+    const stdfs::path destination =
+        stdfs::absolute(
             destinationPath
         ).lexically_normal();
 
@@ -266,7 +266,7 @@ void extractNative(
         );
     }
 
-    bit7z::BitFileExtractor extractor(
+    bit7z::BitExtractor<std::string> extractor(
         library,
         bit7z::BitFormat::SevenZip
     );
