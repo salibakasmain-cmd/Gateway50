@@ -625,44 +625,82 @@ public final class HermesManager {
         File tarball,
         File destination
     ) throws IOException {
-        File busybox = new File(
-            context.getApplicationInfo().nativeLibraryDir,
-            "libbusybox.so"
+        /*
+         * Android's native BusyBox tar is not reliable for this workload:
+         * on some devices it is terminated by the Android seccomp policy.
+         *
+         * CARAVEL already bundles the native 7-Zip/bit7z extraction path
+         * used successfully for Ubuntu. Use that same path for Hermes.
+         *
+         * GitHub codeload tarballs contain a single top-level directory
+         * (hermes-agent-<commit>). Native7z extracts it faithfully, so
+         * flatten that directory into the requested staging directory.
+         */
+        File unpacked = new File(
+            destination.getParentFile(),
+            destination.getName() + ".unpacked"
         );
 
-        if (!busybox.isFile()) {
+        deleteRecursive(unpacked);
+
+        if (!unpacked.mkdirs() && !unpacked.isDirectory()) {
             throw new IOException(
-                "CARAVEL BusyBox runtime is not bundled"
+                "Unable to create Hermes extraction workspace"
             );
         }
 
-        ProcessBuilder pb = new ProcessBuilder(
-            "/system/bin/sh",
-            "-c",
-            "exec -a busybox \"" +
-            busybox.getAbsolutePath() +
-            "\" tar -xzf \"" +
-            tarball.getAbsolutePath() +
-            "\" -C \"" +
-            destination.getAbsolutePath() +
-            "\" --strip-components=1"
-        );
-
-        pb.redirectErrorStream(true);
-
-        Process process = pb.start();
-        int exit = waitAndDrain(
-            process,
-            null,
-            "Hermes extraction"
-        );
-
-        if (exit != 0) {
-            throw new IOException(
-                "Hermes extraction failed (exit " +
-                exit +
-                ")"
+        try {
+            Native7z.extract(
+                context,
+                tarball,
+                unpacked,
+                ""
             );
+
+            File[] children = unpacked.listFiles();
+
+            if (children == null || children.length == 0) {
+                throw new IOException(
+                    "Hermes source archive extracted no files"
+                );
+            }
+
+            File sourceRoot = null;
+
+            if (children.length == 1 &&
+                children[0].isDirectory() &&
+                !java.nio.file.Files.isSymbolicLink(
+                    children[0].toPath()
+                )) {
+                sourceRoot = children[0];
+            }
+
+            File[] entries =
+                sourceRoot != null
+                    ? sourceRoot.listFiles()
+                    : children;
+
+            if (entries == null || entries.length == 0) {
+                throw new IOException(
+                    "Hermes source archive has no source files"
+                );
+            }
+
+            for (File entry : entries) {
+                File target = new File(
+                    destination,
+                    entry.getName()
+                );
+
+                if (!entry.renameTo(target)) {
+                    throw new IOException(
+                        "Unable to activate extracted Hermes entry: " +
+                        entry.getName()
+                    );
+                }
+            }
+        } finally {
+            deleteRecursive(unpacked);
         }
     }
 
