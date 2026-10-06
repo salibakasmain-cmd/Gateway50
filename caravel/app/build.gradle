@@ -1,0 +1,33 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'org.caravel.android'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'org.caravel.android'
+        minSdk 26
+        targetSdk 35
+        versionCode 5
+        versionName "0.4.1"
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging false
+        }
+    }
+}
