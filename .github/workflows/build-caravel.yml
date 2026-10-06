@@ -37,15 +37,9 @@ jobs:
           git clone --filter=blob:none https://github.com/oonid/pr.git "$PR_ROOT"
           git -C "$PR_ROOT" checkout "$PR_COMMIT"
 
-          # The Android proot build only needs these two source dependencies.
-          # Do not initialize the full recursive vendor tree: it includes
-          # unrelated legacy git:// dependencies (BusyBox/musl) that are not
-          # required by scripts/build.sh and make the CI unnecessarily fragile.
-          git -C "$PR_ROOT" -c submodule.vendor/proot.url=https://github.com/proot-me/proot.git submodule update --init --depth 1 vendor/proot
           git -C "$PR_ROOT" -c submodule.vendor/samba.url=https://github.com/samba-team/samba.git submodule update --init --depth 1 vendor/samba
 
           test "$(git -C "$PR_ROOT" rev-parse HEAD)" = "$PR_COMMIT"
-          test -f "$PR_ROOT/vendor/proot/src/proot/src/proot.c"
           test -f "$PR_ROOT/vendor/samba/lib/talloc/talloc.c"
           test -s "$PR_ROOT/android/proot-engine/src/main/jniLibs/arm64-v8a/libbusybox.so"
           echo "PR_ROOT=$PR_ROOT" >> "$GITHUB_ENV"
