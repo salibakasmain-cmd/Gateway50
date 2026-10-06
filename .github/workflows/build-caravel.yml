@@ -18,7 +18,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout CARAVEL
         uses: actions/checkout@v4
@@ -33,21 +32,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           PR_ROOT="$RUNNER_TEMP/pr"
           PR_COMMIT="fcf25cb2396361f0be2edfc96fdd61a6e738c9d9"
-
           git clone --filter=blob:none https://github.com/oonid/pr.git "$PR_ROOT"
           git -C "$PR_ROOT" checkout "$PR_COMMIT"
-
-          # Upstream records some public submodules with SSH-style URLs.
-          # Rewrite the checked-out .gitmodules file before sync so the
-          # submodule source URLs themselves become HTTPS.
-          sed -i             -e 's#git@github.com:#https://github.com/#g'             -e 's#ssh://git@github.com/#https://github.com/#g'             -e 's#git://github.com/#https://github.com/#g'             "$PR_ROOT/.gitmodules"
-
+          sed -i -e 's#git@github.com:#https://github.com/#g' -e 's#ssh://git@github.com/#https://github.com/#g' -e 's#git://github.com/#https://github.com/#g' "$PR_ROOT/.gitmodules"
           git -C "$PR_ROOT" submodule sync --recursive
           git -C "$PR_ROOT" submodule update --init --recursive --depth 1
-
           test "$(git -C "$PR_ROOT" rev-parse HEAD)" = "$PR_COMMIT"
           echo "PR_ROOT=$PR_ROOT" >> "$GITHUB_ENV"
           echo "PR_COMMIT=$PR_COMMIT" >> "$GITHUB_ENV"
@@ -56,17 +47,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          test -x "$SDKMANAGER"
-
           "$SDKMANAGER" --install "ndk;27.2.12479018"
-
-          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
-          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
-
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
-          echo "CARAVEL_NDK_VERSION=27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -77,72 +60,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sed -i "s|/home/o/Android/Sdk/ndk/[^/]*/|$ANDROID_NDK_HOME/|g" "$PR_ROOT/src/pr-cli/.cargo/config.toml"
+          "$PR_ROOT/scripts/build.sh" --arch=arm64 --ndk-path="$ANDROID_NDK_HOME"
 
-          sed -i             "s|/home/o/Android/Sdk/ndk/[^/]*/|$ANDROID_NDK_HOME/|g"             "$PR_ROOT/src/pr-cli/.cargo/config.toml"
+          sed -i '/^pub mod cmd_test;$/d' "$PR_ROOT/src/pr-cli/src/lib.rs"
+          sed -i '/^use pr_cli::cmd_test::command_test;$/d' "$PR_ROOT/src/pr-cli/src/main.rs"
+          perl -0pi -e 's/\n    Test \{.*?\n    \},\n    #\[command\(name = "clear-cache"\)\]/\n    #[command(name = "clear-cache")]/s' "$PR_ROOT/src/pr-cli/src/main.rs"
+          perl -0pi -e 's/\n        Commands::Test \{.*?\n        \}\n        Commands::ClearCache/\n        Commands::ClearCache/s' "$PR_ROOT/src/pr-cli/src/main.rs"
+          ! grep -q '^pub mod cmd_test;$' "$PR_ROOT/src/pr-cli/src/lib.rs"
+          ! grep -q '^use pr_cli::cmd_test::command_test;$' "$PR_ROOT/src/pr-cli/src/main.rs"
+          ! grep -q '^    Test {' "$PR_ROOT/src/pr-cli/src/main.rs"
 
-          "$PR_ROOT/scripts/build.sh"             --arch=arm64             --ndk-path="$ANDROID_NDK_HOME"
-
-          # pr-cli embeds a separate integration-test binary in cmd_test.rs.
-          # CARAVEL only needs the production CLI, so exclude the test-only module
-          # from this temporary checkout rather than fabricating a test binary.
-          sed -i '/^pub mod cmd_test;$/d' \
-            "$PR_ROOT/src/pr-cli/src/lib.rs"
-
-          sed -i '/^use pr_cli::cmd_test::command_test;$/d' \
-            "$PR_ROOT/src/pr-cli/src/main.rs"
-
-          perl -0pi -e \
-            's/\n    Test \{.*?\n    \},\n    #\[command\(name = "clear-cache"\)\]/\n    #[command(name = "clear-cache")]/s' \
-            "$PR_ROOT/src/pr-cli/src/main.rs"
-
-          perl -0pi -e \
-            's/\n        Commands::Test \{.*?\n        \}\n        Commands::ClearCache/\n        Commands::ClearCache/s' \
-            "$PR_ROOT/src/pr-cli/src/main.rs"
-
-          ! grep -q '^pub mod cmd_test;$' \
-            "$PR_ROOT/src/pr-cli/src/lib.rs"
-          ! grep -q '^use pr_cli::cmd_test::command_test;$' \
-            "$PR_ROOT/src/pr-cli/src/main.rs"
-          ! grep -q '^    Test {          (
-            cd "$PR_ROOT/src/pr-cli"
-            cargo build               --target aarch64-linux-android               --release               --bin pr-cli
-          )
+          (cd "$PR_ROOT/src/pr-cli" && cargo build --target aarch64-linux-android --release --bin pr-cli)
 
           JNI_DIR="$GITHUB_WORKSPACE/caravel/app/src/main/jniLibs/arm64-v8a"
           mkdir -p "$JNI_DIR"
-
-          cp "$PR_ROOT/build/out/arm64/proot"             "$JNI_DIR/libproot.so"
-          cp "$PR_ROOT/build/out/arm64/loader"             "$JNI_DIR/libproot-loader.so"
-          cp "$PR_ROOT/src/pr-cli/target/aarch64-linux-android/release/pr-cli"             "$JNI_DIR/libpr-cli.so"
-          cp "$PR_ROOT/android/proot-engine/src/main/jniLibs/arm64-v8a/libbusybox.so"             "$JNI_DIR/libbusybox.so"
-
+          cp "$PR_ROOT/build/out/arm64/proot" "$JNI_DIR/libproot.so"
+          cp "$PR_ROOT/build/out/arm64/loader" "$JNI_DIR/libproot-loader.so"
+          cp "$PR_ROOT/src/pr-cli/target/aarch64-linux-android/release/pr-cli" "$JNI_DIR/libpr-cli.so"
+          cp "$PR_ROOT/android/proot-engine/src/main/jniLibs/arm64-v8a/libbusybox.so" "$JNI_DIR/libbusybox.so"
           chmod 755 "$JNI_DIR"/*.so
 
-          echo "CARAVEL native runtime:"
-          for lib in             libbusybox.so             libpr-cli.so             libproot.so             libproot-loader.so; do
+          for lib in libbusybox.so libpr-cli.so libproot.so libproot-loader.so; do
             test -s "$JNI_DIR/$lib"
             file "$JNI_DIR/$lib"
             readelf -h "$JNI_DIR/$lib" | grep -E "Class|Type|Machine|Entry"
             sha256sum "$JNI_DIR/$lib"
           done
-          # BusyBox provenance is pinned by the checked-out oonid/pr commit above.
 
       - name: Prepare pinned Hermes dashboard source
         shell: bash
         run: |
           set -euo pipefail
-
           HERMES_ROOT="$RUNNER_TEMP/hermes-agent"
           HERMES_COMMIT="345cd2b057a452236de401d3534b8502a7465e8d"
-          HERMES_TARBALL="$RUNNER_TEMP/hermes-agent.tar.gz"
-
-          curl -fL --retry 3 --retry-all-errors             "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT"             -o "$HERMES_TARBALL"
-
+          curl -fL --retry 3 --retry-all-errors "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT" -o "$RUNNER_TEMP/hermes-agent.tar.gz"
           mkdir -p "$HERMES_ROOT"
-          tar -xzf "$HERMES_TARBALL"             --strip-components=1             -C "$HERMES_ROOT"
-
-          grep -q 'version = "0.21.3"'             "$HERMES_ROOT/pyproject.toml"
-          grep -q 'requires-python = ">=3.11,<3.14"'             "$HERMES_ROOT/pyproject.toml"
+          tar -xzf "$RUNNER_TEMP/hermes-agent.tar.gz" --strip-components=1 -C "$HERMES_ROOT"
+          grep -q 'version = "0.21.3"' "$HERMES_ROOT/pyproject.toml"
+          grep -q 'requires-python = ">=3.11,<3.14"' "$HERMES_ROOT/pyproject.toml"
 
       - name: Set up Node for dashboard build
         uses: actions/setup-node@v5
@@ -154,14 +110,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/hermes-agent"
-
           npm ci
           npm run build --workspace web
-
           test -f hermes_cli/web_dist/index.html
-          mkdir -p             "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web"
-
-          cp -a             hermes_cli/web_dist/.             "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web/"
+          mkdir -p "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web"
+          cp -a hermes_cli/web_dist/. "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web/"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -177,27 +130,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
-
-          for lib in             libbusybox.so             libpr-cli.so             libproot.so             libproot-loader.so; do
-            unzip -l "$APK" | grep -q               "lib/arm64-v8a/$lib"
+          for lib in libbusybox.so libpr-cli.so libproot.so libproot-loader.so; do
+            unzip -l "$APK" | grep -q "lib/arm64-v8a/$lib"
           done
-
-          if unzip -l "$APK" | grep -q "lib/arm64-v8a/libqroot"; then
-            echo "ERROR: legacy qroot payload leaked into CARAVEL"
-            exit 1
-          fi
-
-          if unzip -l "$APK" | grep -q "lib/arm64-v8a/libtermux.so"; then
-            echo "ERROR: legacy Hermes libtermux payload leaked into CARAVEL"
-            exit 1
-          fi
-
+          ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libqroot"
+          ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libtermux.so"
           unzip -l "$APK" | grep -q "assets/hermes-web/index.html"
-
-          echo "CARAVEL APK:"
           stat -c '%s bytes' "$APK"
           sha256sum "$APK"
 
@@ -207,213 +147,3 @@ jobs:
           name: caravel-debug
           path: caravel/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 3
- \
-            "$PR_ROOT/src/pr-cli/src/main.rs"
-          ! grep -q '^        Commands::Test {          (
-            cd "$PR_ROOT/src/pr-cli"
-            cargo build               --target aarch64-linux-android               --release               --bin pr-cli
-          )
-
-          JNI_DIR="$GITHUB_WORKSPACE/caravel/app/src/main/jniLibs/arm64-v8a"
-          mkdir -p "$JNI_DIR"
-
-          cp "$PR_ROOT/build/out/arm64/proot"             "$JNI_DIR/libproot.so"
-          cp "$PR_ROOT/build/out/arm64/loader"             "$JNI_DIR/libproot-loader.so"
-          cp "$PR_ROOT/src/pr-cli/target/aarch64-linux-android/release/pr-cli"             "$JNI_DIR/libpr-cli.so"
-          cp "$PR_ROOT/android/proot-engine/src/main/jniLibs/arm64-v8a/libbusybox.so"             "$JNI_DIR/libbusybox.so"
-
-          chmod 755 "$JNI_DIR"/*.so
-
-          echo "CARAVEL native runtime:"
-          for lib in             libbusybox.so             libpr-cli.so             libproot.so             libproot-loader.so; do
-            test -s "$JNI_DIR/$lib"
-            file "$JNI_DIR/$lib"
-            readelf -h "$JNI_DIR/$lib" | grep -E "Class|Type|Machine|Entry"
-            sha256sum "$JNI_DIR/$lib"
-          done
-          # BusyBox provenance is pinned by the checked-out oonid/pr commit above.
-
-      - name: Prepare pinned Hermes dashboard source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          HERMES_ROOT="$RUNNER_TEMP/hermes-agent"
-          HERMES_COMMIT="345cd2b057a452236de401d3534b8502a7465e8d"
-          HERMES_TARBALL="$RUNNER_TEMP/hermes-agent.tar.gz"
-
-          curl -fL --retry 3 --retry-all-errors             "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT"             -o "$HERMES_TARBALL"
-
-          mkdir -p "$HERMES_ROOT"
-          tar -xzf "$HERMES_TARBALL"             --strip-components=1             -C "$HERMES_ROOT"
-
-          grep -q 'version = "0.21.3"'             "$HERMES_ROOT/pyproject.toml"
-          grep -q 'requires-python = ">=3.11,<3.14"'             "$HERMES_ROOT/pyproject.toml"
-
-      - name: Set up Node for dashboard build
-        uses: actions/setup-node@v5
-        with:
-          node-version: "24.21.0"
-
-      - name: Build Hermes dashboard frontend
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/hermes-agent"
-
-          npm ci
-          npm run build --workspace web
-
-          test -f hermes_cli/web_dist/index.html
-          mkdir -p             "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web"
-
-          cp -a             hermes_cli/web_dist/.             "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web/"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.10"
-
-      - name: Build CARAVEL
-        working-directory: caravel
-        run: gradle assembleDebug --no-daemon --stacktrace
-
-      - name: Verify CARAVEL runtime payload
-        working-directory: caravel
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-
-          for lib in             libbusybox.so             libpr-cli.so             libproot.so             libproot-loader.so; do
-            unzip -l "$APK" | grep -q               "lib/arm64-v8a/$lib"
-          done
-
-          if unzip -l "$APK" | grep -q "lib/arm64-v8a/libqroot"; then
-            echo "ERROR: legacy qroot payload leaked into CARAVEL"
-            exit 1
-          fi
-
-          if unzip -l "$APK" | grep -q "lib/arm64-v8a/libtermux.so"; then
-            echo "ERROR: legacy Hermes libtermux payload leaked into CARAVEL"
-            exit 1
-          fi
-
-          unzip -l "$APK" | grep -q "assets/hermes-web/index.html"
-
-          echo "CARAVEL APK:"
-          stat -c '%s bytes' "$APK"
-          sha256sum "$APK"
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: caravel-debug
-          path: caravel/app/build/outputs/apk/debug/app-debug.apk
- \
-            "$PR_ROOT/src/pr-cli/src/main.rs"
-          (
-            cd "$PR_ROOT/src/pr-cli"
-            cargo build               --target aarch64-linux-android               --release               --bin pr-cli
-          )
-
-          JNI_DIR="$GITHUB_WORKSPACE/caravel/app/src/main/jniLibs/arm64-v8a"
-          mkdir -p "$JNI_DIR"
-
-          cp "$PR_ROOT/build/out/arm64/proot"             "$JNI_DIR/libproot.so"
-          cp "$PR_ROOT/build/out/arm64/loader"             "$JNI_DIR/libproot-loader.so"
-          cp "$PR_ROOT/src/pr-cli/target/aarch64-linux-android/release/pr-cli"             "$JNI_DIR/libpr-cli.so"
-          cp "$PR_ROOT/android/proot-engine/src/main/jniLibs/arm64-v8a/libbusybox.so"             "$JNI_DIR/libbusybox.so"
-
-          chmod 755 "$JNI_DIR"/*.so
-
-          echo "CARAVEL native runtime:"
-          for lib in             libbusybox.so             libpr-cli.so             libproot.so             libproot-loader.so; do
-            test -s "$JNI_DIR/$lib"
-            file "$JNI_DIR/$lib"
-            readelf -h "$JNI_DIR/$lib" | grep -E "Class|Type|Machine|Entry"
-            sha256sum "$JNI_DIR/$lib"
-          done
-          # BusyBox provenance is pinned by the checked-out oonid/pr commit above.
-
-      - name: Prepare pinned Hermes dashboard source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          HERMES_ROOT="$RUNNER_TEMP/hermes-agent"
-          HERMES_COMMIT="345cd2b057a452236de401d3534b8502a7465e8d"
-          HERMES_TARBALL="$RUNNER_TEMP/hermes-agent.tar.gz"
-
-          curl -fL --retry 3 --retry-all-errors             "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT"             -o "$HERMES_TARBALL"
-
-          mkdir -p "$HERMES_ROOT"
-          tar -xzf "$HERMES_TARBALL"             --strip-components=1             -C "$HERMES_ROOT"
-
-          grep -q 'version = "0.21.3"'             "$HERMES_ROOT/pyproject.toml"
-          grep -q 'requires-python = ">=3.11,<3.14"'             "$HERMES_ROOT/pyproject.toml"
-
-      - name: Set up Node for dashboard build
-        uses: actions/setup-node@v5
-        with:
-          node-version: "24.21.0"
-
-      - name: Build Hermes dashboard frontend
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/hermes-agent"
-
-          npm ci
-          npm run build --workspace web
-
-          test -f hermes_cli/web_dist/index.html
-          mkdir -p             "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web"
-
-          cp -a             hermes_cli/web_dist/.             "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web/"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.10"
-
-      - name: Build CARAVEL
-        working-directory: caravel
-        run: gradle assembleDebug --no-daemon --stacktrace
-
-      - name: Verify CARAVEL runtime payload
-        working-directory: caravel
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-
-          for lib in             libbusybox.so             libpr-cli.so             libproot.so             libproot-loader.so; do
-            unzip -l "$APK" | grep -q               "lib/arm64-v8a/$lib"
-          done
-
-          if unzip -l "$APK" | grep -q "lib/arm64-v8a/libqroot"; then
-            echo "ERROR: legacy qroot payload leaked into CARAVEL"
-            exit 1
-          fi
-
-          if unzip -l "$APK" | grep -q "lib/arm64-v8a/libtermux.so"; then
-            echo "ERROR: legacy Hermes libtermux payload leaked into CARAVEL"
-            exit 1
-          fi
-
-          unzip -l "$APK" | grep -q "assets/hermes-web/index.html"
-
-          echo "CARAVEL APK:"
-          stat -c '%s bytes' "$APK"
-          sha256sum "$APK"
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: caravel-debug
-          path: caravel/app/build/outputs/apk/debug/app-debug.apk
