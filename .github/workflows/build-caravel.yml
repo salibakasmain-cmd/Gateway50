@@ -90,6 +90,7 @@ jobs:
             sha256sum "$JNI_DIR/$lib"
           done
 
+      # Keep the native 7-Zip build explicitly triggered from the corrected main branch.
       - name: Build native CARAVEL 7-Zip extractor
         shell: bash
         run: |
