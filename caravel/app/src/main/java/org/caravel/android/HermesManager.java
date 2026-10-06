@@ -79,6 +79,10 @@ public final class HermesManager {
             && new File(
                 ubuntu.rootfs(),
                 "usr/local/bin/hermes"
+            ).isFile()
+            && new File(
+                ubuntu.rootfs(),
+                "usr/local/lib/hermes-venv/bin/hermes"
             ).isFile();
     }
 
@@ -478,13 +482,14 @@ public final class HermesManager {
             "ca-certificates curl python3 python3-venv " +
             "python3-pip git ripgrep tar gzip bash; " +
             "mkdir -p /usr/local/lib/hermes-agent; " +
-            "python3 -m venv /usr/local/lib/hermes-agent/venv; " +
-            "/usr/local/lib/hermes-agent/venv/bin/python -m pip " +
+            "rm -rf /usr/local/lib/hermes-venv; " +
+            "python3 -m venv /usr/local/lib/hermes-venv; " +
+            "/usr/local/lib/hermes-venv/bin/python -m pip " +
             "install --no-cache-dir --upgrade pip; " +
-            "/usr/local/lib/hermes-agent/venv/bin/python -m pip " +
+            "/usr/local/lib/hermes-venv/bin/python -m pip " +
             "install --no-cache-dir " +
             "-e '/usr/local/lib/hermes-agent[web,pty]'; " +
-            "ln -sf /usr/local/lib/hermes-agent/venv/bin/hermes " +
+            "ln -sf /usr/local/lib/hermes-venv/bin/hermes " +
             "/usr/local/bin/hermes; " +
             "test -x /usr/local/bin/hermes; " +
             "source /usr/local/lib/hermes-agent/scripts/lib/node-bootstrap.sh; " +
@@ -497,7 +502,7 @@ public final class HermesManager {
             "echo \"CARAVEL_NODE_OK $v\"; " +
             "touch /root/.hermes/.caravel_pm_node_ready; " +
             "test -x /usr/local/bin/hermes; " +
-            "/usr/local/lib/hermes-agent/venv/bin/python --version; " +
+            "/usr/local/lib/hermes-venv/bin/python --version; " +
             "/usr/local/bin/hermes --version";
 
         Process process = runtime.runInDistro(
