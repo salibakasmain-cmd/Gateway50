@@ -663,12 +663,6 @@ public final class HermesManager {
                     ")"
                 );
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException(
-                "Hermes extraction interrupted",
-                e
-            );
         }
     }
 
