@@ -1,31 +1,14 @@
 #include <jni.h>
 
-#include <algorithm>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <stdexcept>
 #include <string>
-#include <system_error>
-#include <utility>
-#include <vector>
 
-#include "bit7z/bitarchiveitem.hpp"
-#include "bit7z/bitarchivereader.hpp"
 #include "bit7z/bitextractor.hpp"
 #include "bit7z/bitformat.hpp"
-#include "bit7z/bitpropvariant.hpp"
-#include "internal/fsutil.hpp"
-
-namespace stdfs = std::filesystem;
 
 namespace {
-
-struct LinkInfo {
-    std::string path;
-    std::string target;
-    bool directory;
-};
 
 std::string fromJstring(JNIEnv* env, jstring value) {
     if (value == nullptr) {
@@ -49,122 +32,6 @@ void throwIOException(JNIEnv* env, const std::string& message) noexcept {
     }
 }
 
-bool isWithinBase(
-    const stdfs::path& candidate,
-    const stdfs::path& base
-) {
-    const std::string baseText =
-        base.generic_string();
-    const std::string candidateText =
-        candidate.generic_string();
-
-    return candidateText == baseText ||
-        (candidateText.size() > baseText.size() &&
-         candidateText.compare(
-             0,
-             baseText.size(),
-             baseText
-         ) == 0 &&
-         candidateText[baseText.size()] == '/');
-}
-
-stdfs::path safeArchivePath(
-    const stdfs::path& base,
-    const std::string& archivePath
-) {
-    const stdfs::path root =
-        stdfs::absolute(base).lexically_normal();
-
-    const stdfs::path candidate =
-        (root / stdfs::path(archivePath)).lexically_normal();
-
-    if (!isWithinBase(candidate, root)) {
-        throw std::runtime_error(
-            "Archive link path escapes extraction directory"
-        );
-    }
-
-    return candidate;
-}
-
-void removeExisting(const stdfs::path& path) {
-    std::error_code ec;
-    stdfs::remove_all(path, ec);
-
-    if (ec) {
-        throw std::runtime_error(
-            "Unable to clear existing extraction path '" +
-            path.string() +
-            "': " +
-            ec.message()
-        );
-    }
-}
-
-void materializeSymlink(
-    const bit7z::SafeOutPathBuilder& builder,
-    const stdfs::path& linkPath,
-    const std::string& target
-) {
-    const stdfs::path parent =
-        linkPath.parent_path();
-
-    std::error_code ec;
-    stdfs::create_directories(parent, ec);
-
-    if (ec) {
-        throw std::runtime_error(
-            "Unable to create symlink parent '" +
-            parent.string() +
-            "': " +
-            ec.message()
-        );
-    }
-
-    removeExisting(linkPath);
-
-    {
-        std::ofstream out(
-            linkPath,
-            std::ios::binary |
-            std::ios::trunc
-        );
-
-        if (!out.is_open()) {
-            throw std::runtime_error(
-                "Unable to create temporary symlink payload '" +
-                linkPath.string() +
-                "'"
-            );
-        }
-
-        out.write(
-            target.data(),
-            static_cast<std::streamsize>(
-                target.size()
-            )
-        );
-
-        if (!out.good()) {
-            throw std::runtime_error(
-                "Unable to write temporary symlink payload '" +
-                linkPath.string() +
-                "'"
-            );
-        }
-    }
-
-    if (!builder.restoreSymlink(linkPath)) {
-        throw std::runtime_error(
-            "Unable to restore symlink '" +
-            linkPath.string() +
-            "' -> '" +
-            target +
-            "'"
-        );
-    }
-}
-
 void extractNative(
     const std::string& archivePath,
     const std::string& destinationPath,
@@ -174,97 +41,6 @@ void extractNative(
     bit7z::Bit7zLibrary library(
         sevenZipLibraryPath
     );
-
-    bit7z::BitArchiveReader reader(
-        library,
-        archivePath,
-        bit7z::BitFormat::SevenZip
-    );
-
-    std::vector<LinkInfo> directoryLinks;
-    std::vector<LinkInfo> fileLinks;
-
-    for (const auto& item : reader.items()) {
-        if (!item.isSymLink()) {
-            continue;
-        }
-
-        const auto targetProperty =
-            item.itemProperty(
-                bit7z::BitProperty::SymLink
-            );
-
-        if (targetProperty.isEmpty() ||
-            !targetProperty.isString()) {
-            continue;
-        }
-
-        const std::string target =
-            targetProperty.getNativeString();
-
-        if (target.empty()) {
-            continue;
-        }
-
-        LinkInfo info{
-            item.path(),
-            target,
-            item.isDir()
-        };
-
-        if (info.directory) {
-            directoryLinks.emplace_back(
-                std::move(info)
-            );
-        } else {
-            fileLinks.emplace_back(
-                std::move(info)
-            );
-        }
-    }
-
-    auto depth =
-        [](const LinkInfo& info) {
-            return static_cast<int>(
-                std::count(
-                    info.path.begin(),
-                    info.path.end(),
-                    '/'
-                )
-            );
-        };
-
-    std::sort(
-        directoryLinks.begin(),
-        directoryLinks.end(),
-        [&](const LinkInfo& a,
-            const LinkInfo& b) {
-            return depth(a) < depth(b);
-        }
-    );
-
-    const stdfs::path destination =
-        stdfs::absolute(
-            destinationPath
-        ).lexically_normal();
-
-    bit7z::SafeOutPathBuilder pathBuilder(
-        destination.string()
-    );
-
-    // Match the Android Hermes extraction ordering:
-    // directory symlinks are established first so files
-    // extracted below them resolve into their real target.
-    for (const auto& info : directoryLinks) {
-        materializeSymlink(
-            pathBuilder,
-            safeArchivePath(
-                destination,
-                info.path
-            ),
-            info.target
-        );
-    }
 
     bit7z::BitExtractor<std::string> extractor(
         library,
@@ -280,28 +56,26 @@ void extractNative(
         extractor.setPassword(password);
     }
 
+    /*
+     * Let bit7z perform the complete POSIX extraction lifecycle.
+     *
+     * In particular, Bit7z's FileExtractCallback writes symbolic-link
+     * payloads first and then restores them from the archive's POSIX
+     * metadata.  This is important for Ubuntu's merged-/usr layout:
+     * /bin, /sbin, /lib, and /lib64 are commonly symbolic links.
+     *
+     * Do not filter item.isSymLink() here.  isSymLink() can be true
+     * because of POSIX file attributes even when BitProperty::SymLink
+     * is not populated as a string.  Filtering those entries would
+     * silently delete essential links such as /bin -> usr/bin.
+     *
+     * BIT7Z_PATH_SANITIZATION is enabled at build time, so archive
+     * paths and restored symlink targets are still validated by bit7z.
+     */
     extractor.extract(
         archivePath,
-        destination.string(),
-        [](const bit7z::BitArchiveItem& item)
-            -> std::string {
-            if (item.isSymLink()) {
-                return {};
-            }
-            return item.path();
-        }
+        destinationPath
     );
-
-    for (const auto& info : fileLinks) {
-        materializeSymlink(
-            pathBuilder,
-            safeArchivePath(
-                destination,
-                info.path
-            ),
-            info.target
-        );
-    }
 }
 
 } // namespace
