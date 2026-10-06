@@ -14,8 +14,13 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class UbuntuManager {
     public static final String VERSION = "24.04.5";
@@ -393,6 +398,10 @@ public final class UbuntuManager {
         // syscall/seccomp policy. The bundled BusyBox binary can be
         // killed by Android's seccomp filter with SIGSYS (exit 159)
         // during tar extraction on some Android releases.
+        //
+        // Android SELinux also denies hard-link creation for untrusted
+        // app domains. Toybox therefore may exit 1 after extracting the
+        // rootfs when the Ubuntu tarball contains hard-link entries.
         String toybox = "/system/bin/toybox";
 
         ProcessBuilder pb = new ProcessBuilder(
@@ -410,12 +419,20 @@ public final class UbuntuManager {
             String output = readProcessOutput(process);
             int exit = process.waitFor();
 
-            if (exit != 0) {
-                throw new IOException(
-                    "Ubuntu extraction failed (exit " + exit + ")" +
-                    (output.isEmpty() ? "" : ": " + tail(output))
-                );
+            if (exit == 0) {
+                return;
             }
+
+            int repaired = repairDeniedHardLinks(output, destination);
+
+            if (repairMessagesContainOnlyExpectedHardLinkErrors(output, repaired)) {
+                return;
+            }
+
+            throw new IOException(
+                "Ubuntu extraction failed (exit " + exit + ")" +
+                (output.isEmpty() ? "" : ": " + tail(output))
+            );
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException(
@@ -425,6 +442,94 @@ public final class UbuntuManager {
         }
     }
 
+    private static final Pattern HARD_LINK_ERROR =
+        Pattern.compile(
+            "tar: can't link '([^']+)' -> '([^']+)': Permission denied"
+        );
+
+    private static int repairDeniedHardLinks(
+        String output,
+        File destination
+    ) throws IOException {
+
+        Matcher matcher = HARD_LINK_ERROR.matcher(output);
+        int repaired = 0;
+
+        while (matcher.find()) {
+            File source = safeResolve(destination, matcher.group(1));
+            File target = safeResolve(destination, matcher.group(2));
+
+            if (!source.isFile()) {
+                throw new IOException(
+                    "Ubuntu hard-link target missing during repair: " +
+                    matcher.group(1)
+                );
+            }
+
+            File parent = target.getParentFile();
+
+            if (parent != null) {
+                mkdirs(parent);
+            }
+
+            Files.deleteIfExists(target.toPath());
+            Files.copy(
+                source.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.COPY_ATTRIBUTES
+            );
+
+            repaired++;
+        }
+
+        return repaired;
+    }
+
+    private static boolean repairMessagesContainOnlyExpectedHardLinkErrors(
+        String output,
+        int repaired
+    ) {
+        if (repaired == 0) {
+            return false;
+        }
+
+        String[] lines = output.split("\\R");
+        int expected = 0;
+
+        for (String line : lines) {
+            if (line.trim().isEmpty()) {
+                continue;
+            }
+
+            if (HARD_LINK_ERROR.matcher(line).matches()) {
+                expected++;
+                continue;
+            }
+
+            return false;
+        }
+
+        return expected == repaired;
+    }
+
+    private static File safeResolve(
+        File destination,
+        String relative
+    ) throws IOException {
+
+        Path base = destination.toPath().toAbsolutePath().normalize();
+        Path resolved = base.resolve(relative).normalize();
+
+        if (!resolved.startsWith(base)) {
+            throw new IOException(
+                "Unsafe Ubuntu archive path: " + relative
+            );
+        }
+
+        return resolved.toFile();
+    }
+
     private void prepareRootfs(File dir) throws IOException {
         File etc = new File(dir, "etc");
         mkdirs(etc);
@@ -432,13 +537,13 @@ public final class UbuntuManager {
         File resolv = new File(etc, "resolv.conf");
 
         if (resolv.exists() ||
-            java.nio.file.Files.isSymbolicLink(resolv.toPath())) {
-            java.nio.file.Files.deleteIfExists(resolv.toPath());
+            Files.isSymbolicLink(resolv.toPath())) {
+            Files.deleteIfExists(resolv.toPath());
         }
 
         writeText(resolv, buildResolvConf());
 
-        File environment = new File(etc, "environment");
+        File environment = new File(dir, "etc/environment");
 
         if (!environment.isFile()) {
             writeText(environment, "");
@@ -493,7 +598,7 @@ public final class UbuntuManager {
                         !dns.getHostAddress().isEmpty()) {
                         out.append("nameserver ")
                             .append(dns.getHostAddress())
-                            .append('\n');
+                            .append('\\n');
                     }
                 }
             }
@@ -502,8 +607,8 @@ public final class UbuntuManager {
         }
 
         if (out.length() == 0) {
-            out.append("nameserver 1.1.1.1\n")
-                .append("nameserver 8.8.8.8\n");
+            out.append("nameserver 1.1.1.1\\n")
+                .append("nameserver 8.8.8.8\\n");
         }
 
         return out.toString();
@@ -525,12 +630,12 @@ public final class UbuntuManager {
             int n;
 
             while ((n = in.read(buffer)) != -1) {
-                if (output.length() < 32768) {
+                if (output.length() < 262144) {
                     output.append(
                         new String(
                             buffer,
                             0,
-                            Math.min(n, 32768 - output.length()),
+                            Math.min(n, 262144 - output.length()),
                             StandardCharsets.UTF_8
                         )
                     );
@@ -585,7 +690,7 @@ public final class UbuntuManager {
         }
 
         if (file.isDirectory() &&
-            !java.nio.file.Files.isSymbolicLink(file.toPath())) {
+            !Files.isSymbolicLink(file.toPath())) {
 
             File[] children = file.listFiles();
 
