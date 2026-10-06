@@ -309,7 +309,7 @@ public final class HermesManager {
 
         String command =
             "export HERMES_HOME=/root/.hermes; " +
-            "export PATH=/usr/local/lib/hermes-agent/venv/bin:" +
+            "export PATH=/root/.hermes/node/bin:/usr/local/lib/hermes-agent/venv/bin:" +
             "/usr/local/bin:$PATH; " +
             "cd /root/workspace && " +
             "exec /usr/local/bin/hermes " +
@@ -487,19 +487,14 @@ public final class HermesManager {
             "ln -sf /usr/local/lib/hermes-agent/venv/bin/hermes " +
             "/usr/local/bin/hermes; " +
             "test -x /usr/local/bin/hermes; " +
-            "HERMES_HOME=/root/.hermes " +
-            "/usr/local/bin/hermes pm install node; " +
-            "HERMES_HOME=/root/.hermes " +
-            "/usr/local/bin/hermes pm doctor; " +
-            "python3 -c 'from pm import installed_package; " +
-            "import subprocess; " +
-            "node=installed_package(\"node\"); " +
-            "assert node is not None and node.binary is not None, \"PM Node missing\"; " +
-            "v=subprocess.run([str(node.binary), \"--version\"], check=True, capture_output=True, text=True).stdout.strip(); " +
-            "assert v.startswith(\"v" +
-            NODE_TARGET_MAJOR +
-            ".\"), \"unexpected Node version: \"+v; " +
-            "print(\"CARAVEL_PM_NODE_OK \"+v)'; " +
+            "source /usr/local/lib/hermes-agent/scripts/lib/node-bootstrap.sh; " +
+            "ensure_node; " +
+            "test -x /root/.hermes/node/bin/node; " +
+            "test -x /root/.hermes/node/bin/npm; " +
+            "v=\"$(/root/.hermes/node/bin/node --version)\"; " +
+            "case \"$v\" in v${HERMES_NODE_TARGET_MAJOR}.*) ;; " +
+            "*) echo \"Unexpected Node version: $v\" >&2; exit 1 ;; esac; " +
+            "echo \"CARAVEL_NODE_OK $v\"; " +
             "touch /root/.hermes/.caravel_pm_node_ready; " +
             "test -x /usr/local/bin/hermes; " +
             "/usr/local/lib/hermes-agent/venv/bin/python --version; " +
