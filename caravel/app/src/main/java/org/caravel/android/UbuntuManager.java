@@ -208,11 +208,9 @@ public final class UbuntuManager {
                 ),
                 "Ubuntu Base " +
                 VERSION +
-                " arm64
-" +
+                " arm64\n" +
                 verification +
-                "
-"
+                "\n"
             );
 
             deleteRecursive(old);
