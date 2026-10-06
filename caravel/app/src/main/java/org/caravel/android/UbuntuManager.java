@@ -5,6 +5,11 @@ import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.os.StatFs;
+import android.system.Os;
+
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -389,122 +394,186 @@ public final class UbuntuManager {
         File destination
     ) throws IOException {
 
-        // Android SELinux blocks ordinary hard-link creation for
-        // untrusted app processes. CARAVEL already ships a patched
-        // PRoot engine with link2symlink support, so perform the
-        // initial rootfs extraction through PRoot instead of calling
-        // Toybox tar directly.
-        //
-        // The Android system Toybox binary is exposed through /system
-        // and /apex binds. The verified archive is exposed through the
-        // CARAVEL download-cache bind, while the Ubuntu staging
-        // directory is the PRoot root.
-        PrCliRuntime runtime = new PrCliRuntime(context);
-        runtime.ensureLayout();
+        // Android's SELinux policy blocks hard-link creation by an
+        // untrusted application. Ubuntu Base contains hard-link entries,
+        // so extract them as ordinary file copies instead. This keeps the
+        // rootfs semantically usable while avoiding any privileged syscall.
+        File canonicalDestination = destination.getCanonicalFile();
+        java.util.ArrayList<String> pendingHardLinks =
+            new java.util.ArrayList<>();
+        java.util.ArrayList<String> pendingHardLinkTargets =
+            new java.util.ArrayList<>();
 
-        File proot = new File(
-            runtime.prefixDir(),
-            "bin/proot"
-        );
-        File loader = new File(
-            runtime.nativeDir(),
-            "libproot-loader.so"
-        );
-        File l2sDir = new File(
-            destination,
-            ".l2s"
-        );
+        try (
+            InputStream fileIn = new FileInputStream(tarball);
+            InputStream gzipIn = new GzipCompressorInputStream(fileIn);
+            TarArchiveInputStream tarIn = new TarArchiveInputStream(gzipIn)
+        ) {
+            TarArchiveEntry entry;
+            byte[] buffer = new byte[131072];
 
-        if (!proot.isFile()) {
-            throw new IOException(
-                "CARAVEL PRoot runtime is not available"
-            );
-        }
+            while ((entry = tarIn.getNextTarEntry()) != null) {
+                if (entry.isGlobalPaxHeader() ||
+                    entry.isPaxHeader() ||
+                    entry.isGNULongNameEntry() ||
+                    entry.isGNULongLinkEntry()) {
+                    continue;
+                }
 
-        if (!loader.isFile()) {
-            throw new IOException(
-                "CARAVEL PRoot loader is not available"
-            );
-        }
+                File output = safeArchivePath(
+                    canonicalDestination,
+                    entry.getName()
+                );
 
-        mkdirs(l2sDir);
+                if (entry.isDirectory()) {
+                    mkdirs(output);
+                    applyMode(output, entry.getMode());
+                    continue;
+                }
 
-        java.util.List<String> args = new java.util.ArrayList<>();
-        args.add(proot.getAbsolutePath());
-        args.add("--link2symlink");
-        args.add("--change-id=0:0");
-        args.add("--rootfs=" + destination.getAbsolutePath());
-        args.add("--bind=/dev");
-        args.add("--bind=/proc");
-        args.add("--bind=/sys");
-        args.add("--bind=/system");
-        args.add("--bind=/apex");
-        args.add(
-            "--bind=" +
-            cache.getAbsolutePath() +
-            ":/caravel-cache"
-        );
-        args.add("-w");
-        args.add("/");
-        args.add("/system/bin/toybox");
-        args.add("tar");
-        args.add("-xzf");
-        args.add("/caravel-cache/" + tarball.getName());
-        args.add("-C");
-        args.add("/");
+                File parent = output.getParentFile();
+                mkdirs(parent);
+                deleteIfPresent(output);
 
-        ProcessBuilder pb = new ProcessBuilder(args);
-        pb.directory(destination);
-        pb.redirectErrorStream(true);
+                if (entry.isSymbolicLink()) {
+                    String link = entry.getLinkName();
+                    if (link == null || link.isEmpty()) {
+                        throw new IOException(
+                            "Ubuntu archive contains an empty symbolic link: " +
+                            entry.getName()
+                        );
+                    }
+                    Os.symlink(link, output.getAbsolutePath());
+                    continue;
+                }
 
-        java.util.Map<String, String> env = pb.environment();
-        env.put("PROOT_NO_SECCOMP", "1");
-        env.put(
-            "PROOT_L2S_DIR",
-            l2sDir.getAbsolutePath()
-        );
-        env.put(
-            "PROOT_TMP_DIR",
-            runtime.cacheDir().getAbsolutePath()
-        );
-        env.put(
-            "TMPDIR",
-            runtime.cacheDir().getAbsolutePath()
-        );
-        env.put(
-            "PROOT_LOADER",
-            loader.getAbsolutePath()
-        );
-        env.put(
-            "PATH",
-            "/system/bin:/system/xbin"
-        );
-        env.put(
-            "HOME",
-            "/root"
-        );
-        env.put(
-            "TERM",
-            "xterm-256color"
-        );
+                if (entry.isLink()) {
+                    File target = safeArchivePath(
+                        canonicalDestination,
+                        entry.getLinkName()
+                    );
+                    if (target.isFile()) {
+                        copyFile(target, output, buffer);
+                    } else {
+                        pendingHardLinks.add(output.getAbsolutePath());
+                        pendingHardLinkTargets.add(target.getAbsolutePath());
+                    }
+                    continue;
+                }
 
-        try {
-            Process process = pb.start();
-            String output = readProcessOutput(process);
-            int exit = process.waitFor();
+                if (entry.isFile()) {
+                    try (FileOutputStream out = new FileOutputStream(output)) {
+                        int n;
+                        while ((n = tarIn.read(buffer)) != -1) {
+                            out.write(buffer, 0, n);
+                        }
+                    }
+                    applyMode(output, entry.getMode());
+                    continue;
+                }
 
-            if (exit != 0) {
+                if (entry.isFIFO() ||
+                    entry.isCharacterDevice() ||
+                    entry.isBlockDevice()) {
+                    // Device/FIFO nodes cannot be created safely by the
+                    // Android app. PRoot does not require them for the
+                    // initial Ubuntu Base installation, so leave these
+                    // entries absent.
+                    continue;
+                }
+
                 throw new IOException(
-                    "Ubuntu extraction failed (exit " + exit + ")" +
-                    (output.isEmpty() ? "" : ": " + tail(output))
+                    "Unsupported Ubuntu archive entry: " + entry.getName()
                 );
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        }
+
+        boolean changed = true;
+        while (!pendingHardLinks.isEmpty() && changed) {
+            changed = false;
+            for (int i = pendingHardLinks.size() - 1; i >= 0; i--) {
+                File target = new File(pendingHardLinkTargets.get(i));
+                if (target.isFile()) {
+                    File output = new File(pendingHardLinks.get(i));
+                    copyFile(target, output, new byte[131072]);
+                    pendingHardLinks.remove(i);
+                    pendingHardLinkTargets.remove(i);
+                    changed = true;
+                }
+            }
+        }
+
+        if (!pendingHardLinks.isEmpty()) {
             throw new IOException(
-                "Ubuntu extraction interrupted",
-                e
+                "Ubuntu archive contains unresolved hard links: " +
+                pendingHardLinks.get(0)
             );
+        }
+    }
+
+    private static File safeArchivePath(
+        File root,
+        String entryName
+    ) throws IOException {
+        if (entryName == null || entryName.isEmpty()) {
+            throw new IOException("Ubuntu archive contains an empty path");
+        }
+
+        String normalized = entryName.replace('\\\\', '/');
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+
+        java.nio.file.Path rootPath = root.toPath().toAbsolutePath().normalize();
+        java.nio.file.Path result = rootPath.resolve(normalized).normalize();
+        if (!result.startsWith(rootPath)) {
+            throw new IOException(
+                "Unsafe Ubuntu archive path: " + entryName
+            );
+        }
+        return result.toFile();
+    }
+
+    private static void copyFile(
+        File source,
+        File destination,
+        byte[] buffer
+    ) throws IOException {
+        File parent = destination.getParentFile();
+        mkdirs(parent);
+        try (InputStream in = new FileInputStream(source);
+             FileOutputStream out = new FileOutputStream(destination)) {
+            int n;
+            while ((n = in.read(buffer)) != -1) {
+                out.write(buffer, 0, n);
+            }
+        }
+        destination.setLastModified(source.lastModified());
+    }
+
+    private static void applyMode(File file, int mode) {
+        if (mode <= 0) {
+            return;
+        }
+        try {
+            Os.chmod(
+                file.getAbsolutePath(),
+                mode & 07777
+            );
+        } catch (Exception ignored) {
+            // File content remains valid even if Android rejects a mode.
+        }
+    }
+
+    private static void deleteIfPresent(File file) throws IOException {
+        if (file.exists() ||
+            java.nio.file.Files.isSymbolicLink(file.toPath())) {
+            if (file.isDirectory() &&
+                !java.nio.file.Files.isSymbolicLink(file.toPath())) {
+                deleteRecursive(file);
+            } else if (!file.delete()) {
+                throw new IOException("Unable to replace " + file);
+            }
         }
     }
 
