@@ -389,23 +389,19 @@ public final class UbuntuManager {
         File destination
     ) throws IOException {
 
-        String busybox = new File(
-            context.getApplicationInfo().nativeLibraryDir,
-            "libbusybox.so"
-        ).getAbsolutePath();
-
-        String command =
-            "exec -a busybox " +
-            shellQuote(busybox) +
-            " tar -xzf " +
-            shellQuote(tarball.getAbsolutePath()) +
-            " -C " +
-            shellQuote(destination.getAbsolutePath());
+        // Android's system Toybox is built for the device's Android
+        // syscall/seccomp policy. The bundled BusyBox binary can be
+        // killed by Android's seccomp filter with SIGSYS (exit 159)
+        // during tar extraction on some Android releases.
+        String toybox = "/system/bin/toybox";
 
         ProcessBuilder pb = new ProcessBuilder(
-            "/system/bin/sh",
-            "-c",
-            command
+            toybox,
+            "tar",
+            "-xzf",
+            tarball.getAbsolutePath(),
+            "-C",
+            destination.getAbsolutePath()
         );
         pb.redirectErrorStream(true);
 
