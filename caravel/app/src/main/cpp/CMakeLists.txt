@@ -91,6 +91,13 @@ set(BIT7Z_SOURCES
 
 add_library(caravel_bit7z STATIC ${BIT7Z_SOURCES})
 
+target_link_libraries(
+    caravel_bit7z
+    PRIVATE
+        7-zip
+        ${CMAKE_DL_LIBS}
+)
+
 target_include_directories(caravel_bit7z
     PUBLIC
         ${BIT7Z_ROOT}/include
