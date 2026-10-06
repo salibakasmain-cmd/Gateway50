@@ -507,6 +507,10 @@ public final class UbuntuManager {
                 continue;
             }
 
+            if (line.trim().equals("tar: had errors")) {
+                continue;
+            }
+
             return false;
         }
 
