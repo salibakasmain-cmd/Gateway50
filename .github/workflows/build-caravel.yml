@@ -36,18 +36,18 @@ jobs:
           PR_COMMIT="fcf25cb2396361f0be2edfc96fdd61a6e738c9d9"
           git clone --filter=blob:none https://github.com/oonid/pr.git "$PR_ROOT"
           git -C "$PR_ROOT" checkout "$PR_COMMIT"
-          git -C "$PR_ROOT" config --file .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key url; do
-            case "$url" in
-              git://busybox.net/*) url="https://busybox.net/${url#git://busybox.net/}" ;;
-              git://*) url="https://${url#git://}" ;;
-              ssh://git@github.com/*) url="https://github.com/${url#ssh://git@github.com/}" ;;
-              git@github.com:*) url="https://github.com/${url#git@github.com:}" ;;
-            esac
-            git -C "$PR_ROOT" config --file .gitmodules "$key" "$url"
-          done
-          git -C "$PR_ROOT" submodule sync --recursive
-          git -C "$PR_ROOT" submodule update --init --recursive --depth 1
+
+          # The Android proot build only needs these two source dependencies.
+          # Do not initialize the full recursive vendor tree: it includes
+          # unrelated legacy git:// dependencies (BusyBox/musl) that are not
+          # required by scripts/build.sh and make the CI unnecessarily fragile.
+          git -C "$PR_ROOT" -c submodule.vendor/proot.url=https://github.com/proot-me/proot.git submodule update --init --depth 1 vendor/proot
+          git -C "$PR_ROOT" -c submodule.vendor/samba.url=https://github.com/samba-team/samba.git submodule update --init --depth 1 vendor/samba
+
           test "$(git -C "$PR_ROOT" rev-parse HEAD)" = "$PR_COMMIT"
+          test -f "$PR_ROOT/vendor/proot/src/proot/src/proot.c"
+          test -f "$PR_ROOT/vendor/samba/lib/talloc/talloc.c"
+          test -s "$PR_ROOT/android/proot-engine/src/main/jniLibs/arm64-v8a/libbusybox.so"
           echo "PR_ROOT=$PR_ROOT" >> "$GITHUB_ENV"
           echo "PR_COMMIT=$PR_COMMIT" >> "$GITHUB_ENV"
 
