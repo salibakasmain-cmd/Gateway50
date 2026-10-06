@@ -389,16 +389,23 @@ public final class UbuntuManager {
         File destination
     ) throws IOException {
 
+        String busybox = new File(
+            context.getApplicationInfo().nativeLibraryDir,
+            "libbusybox.so"
+        ).getAbsolutePath();
+
+        String command =
+            "exec -a busybox " +
+            shellQuote(busybox) +
+            " tar -xzf " +
+            shellQuote(tarball.getAbsolutePath()) +
+            " -C " +
+            shellQuote(destination.getAbsolutePath());
+
         ProcessBuilder pb = new ProcessBuilder(
-            new File(
-                context.getApplicationInfo().nativeLibraryDir,
-                "libbusybox.so"
-            ).getAbsolutePath(),
-            "tar",
-            "-xzf",
-            tarball.getAbsolutePath(),
-            "-C",
-            destination.getAbsolutePath()
+            "/system/bin/sh",
+            "-c",
+            command
         );
         pb.redirectErrorStream(true);
 
@@ -504,6 +511,12 @@ public final class UbuntuManager {
         }
 
         return out.toString();
+    }
+
+    private static String shellQuote(String value) {
+        return "'" +
+            value.replace("'", "'\\''") +
+            "'";
     }
 
     private static String readProcessOutput(Process process)
