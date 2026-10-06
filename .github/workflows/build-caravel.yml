@@ -90,6 +90,73 @@ jobs:
             sha256sum "$JNI_DIR/$lib"
           done
 
+      - name: Build native CARAVEL 7-Zip extractor
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BIT7Z_ROOT="$RUNNER_TEMP/bit7z"
+          SEVENZIP_ROOT="$RUNNER_TEMP/7zip"
+          SEVENZIP_OUT="$RUNNER_TEMP/7zip-build"
+          JNI_BUILD="$RUNNER_TEMP/caravel-7z-jni"
+          JNI_DIR="$GITHUB_WORKSPACE/caravel/app/src/main/jniLibs/arm64-v8a"
+
+          rm -rf "$BIT7Z_ROOT" "$SEVENZIP_ROOT" "$SEVENZIP_OUT" "$JNI_BUILD"
+
+          git clone --depth 1 --branch v4.1.0 https://github.com/rikyoz/bit7z.git "$BIT7Z_ROOT"
+          git clone --depth 1 --branch v26.01 https://github.com/rikyoz/7-Zip.git "$SEVENZIP_ROOT"
+
+          export TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
+          export AR="$TOOLCHAIN/llvm-ar"
+          export RANLIB="$TOOLCHAIN/llvm-ranlib"
+
+          mkdir -p "$SEVENZIP_OUT"
+
+          make -C "$SEVENZIP_ROOT/CPP/7zip/Bundles/Format7zF" \
+            -f makefile.gcc \
+            -j2 \
+            O="$SEVENZIP_OUT" \
+            PROG=7z \
+            DEF_FILE="$SEVENZIP_ROOT/CPP/7zip/Archive/Archive2.def" \
+            CC="$CC" \
+            CXX="$CXX" \
+            AR="$AR" \
+            RANLIB="$RANLIB" \
+            LIB2="-ldl" \
+            CFLAGS_WARN_WALL="" \
+            CFLAGS_WARN="" \
+            CXXFLAGS_WARN="" \
+            MY_LIBS="-Wl,-z,max-page-size=16384"
+
+          test -s "$SEVENZIP_OUT/7z.so"
+
+          cmake \
+            -S "$GITHUB_WORKSPACE/caravel/app/src/main/cpp" \
+            -B "$JNI_BUILD" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=24 \
+            -DANDROID_STL=c++_shared \
+            -DBIT7Z_ROOT="$BIT7Z_ROOT"
+
+          cmake --build "$JNI_BUILD" --config Release -j2
+
+          cp "$JNI_BUILD/libcaravel_7z_jni.so" "$JNI_DIR/libcaravel_7z_jni.so"
+          cp "$SEVENZIP_OUT/7z.so" "$JNI_DIR/lib7z.so"
+          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$JNI_DIR/libc++_shared.so"
+
+          chmod 755 "$JNI_DIR"/libcaravel_7z_jni.so "$JNI_DIR"/lib7z.so
+
+          for lib in libcaravel_7z_jni.so lib7z.so libc++_shared.so; do
+            test -s "$JNI_DIR/$lib"
+            file "$JNI_DIR/$lib"
+            readelf -h "$JNI_DIR/$lib" | grep -E "Class|Type|Machine"
+            readelf -d "$JNI_DIR/$lib" | grep NEEDED || true
+            sha256sum "$JNI_DIR/$lib"
+          done
+
       - name: Prepare pinned Hermes dashboard source
         shell: bash
         run: |
@@ -134,7 +201,7 @@ jobs:
           set -euo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
-          for lib in libbusybox.so libpr-cli.so libproot.so libproot-loader.so; do
+          for lib in libbusybox.so libpr-cli.so libproot.so libproot-loader.so libcaravel_7z_jni.so lib7z.so libc++_shared.so; do
             unzip -l "$APK" | grep -q "lib/arm64-v8a/$lib"
           done
           ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libqroot"

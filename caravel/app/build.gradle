@@ -25,7 +25,7 @@ android {
         }
     }
 
-    dependencies {\n        implementation 'org.apache.commons:commons-compress:1.28.0'\n    }\n\n    packaging {
+    packaging {
         jniLibs {
             useLegacyPackaging false
         }

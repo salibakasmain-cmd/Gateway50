@@ -22,14 +22,43 @@ The upstream project documents:
 Source:
 https://github.com/oonid/pr/tree/fcf25cb2396361f0be2edfc96fdd61a6e738c9d9
 
+## Native 7-Zip extraction stack
+
+CARAVEL follows the Hermes 3.8 extraction architecture:
+
+`Java -> JNI -> bit7z -> 7-Zip shared library`
+
+CARAVEL builds:
+
+- bit7z v4.1.0 — Mozilla Public License 2.0;
+- 7-Zip v26.01 — upstream 7-Zip licensing applies;
+- Android NDK libc++ shared runtime.
+
+The JNI layer skips archive symlinks during the ordinary extraction pass,
+pre-creates directory symlinks, then restores file symlinks through bit7z's
+safe output-path handling.
+
+Sources:
+https://github.com/rikyoz/bit7z/releases/tag/v4.1.0
+https://github.com/ip7z/7zip/releases/tag/26.01
+
 ## Ubuntu Base
 
-CARAVEL downloads Ubuntu Base 24.04.5 ARM64 from Canonical and verifies:
+CARAVEL downloads the fixed Xermes Android ARM64 Ubuntu archive:
 
-`a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2`
+`ubuntu.7z`
+
+Release:
+`v2026.09.02-model-startup`
+
+SHA-256:
+
+`01049b0d56fb5e8d8fc8483756bf43144942ab50a00978c7f531e6f9ec1462a8`
 
 Source:
-https://cdimages.ubuntu.com/ubuntu-base/releases/24.04/release/
+https://github.com/goldenduo/XermesRelease/releases/tag/v2026.09.02-model-startup
+
+The asset is pinned rather than using a moving `latest` URL.
 
 ## Node.js
 
@@ -48,7 +77,7 @@ CARAVEL uses official Nous Research Hermes Agent source at:
 
 `345cd2b057a452236de401d3534b8502a7465e8d`
 
-Version: 0.21.3  
+Version: 0.21.3
 License: MIT
 
 Source:
@@ -60,7 +89,7 @@ in CARAVEL.
 ## Legacy Hermes 3.8 APK
 
 The reverse-engineered Hermes 3.8 APK remains in this repository only as a
-historical/architectural reference for the original QRoot investigation.
+historical/architectural reference.
 
 CARAVEL does not distribute its PairIP licensing layer, embedded third-party
 AI credential, or the legacy Hermes `libqroot`/`libtermux` runtime.
