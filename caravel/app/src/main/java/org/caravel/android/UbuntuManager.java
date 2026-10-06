@@ -14,13 +14,8 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public final class UbuntuManager {
     public static final String VERSION = "24.04.5";
@@ -394,45 +389,116 @@ public final class UbuntuManager {
         File destination
     ) throws IOException {
 
-        // Android's system Toybox is built for the device's Android
-        // syscall/seccomp policy. The bundled BusyBox binary can be
-        // killed by Android's seccomp filter with SIGSYS (exit 159)
-        // during tar extraction on some Android releases.
+        // Android SELinux blocks ordinary hard-link creation for
+        // untrusted app processes. CARAVEL already ships a patched
+        // PRoot engine with link2symlink support, so perform the
+        // initial rootfs extraction through PRoot instead of calling
+        // Toybox tar directly.
         //
-        // Android SELinux also denies hard-link creation for untrusted
-        // app domains. Toybox therefore may exit 1 after extracting the
-        // rootfs when the Ubuntu tarball contains hard-link entries.
-        String toybox = "/system/bin/toybox";
+        // The Android system Toybox binary is exposed through /system
+        // and /apex binds. The verified archive is exposed through the
+        // CARAVEL download-cache bind, while the Ubuntu staging
+        // directory is the PRoot root.
+        PrCliRuntime runtime = new PrCliRuntime(context);
+        runtime.ensureLayout();
 
-        ProcessBuilder pb = new ProcessBuilder(
-            toybox,
-            "tar",
-            "-xzf",
-            tarball.getAbsolutePath(),
-            "-C",
-            destination.getAbsolutePath()
+        File proot = new File(
+            runtime.prefixDir(),
+            "bin/proot"
         );
+        File loader = new File(
+            runtime.nativeDir(),
+            "libproot-loader.so"
+        );
+        File l2sDir = new File(
+            destination,
+            ".l2s"
+        );
+
+        if (!proot.isFile()) {
+            throw new IOException(
+                "CARAVEL PRoot runtime is not available"
+            );
+        }
+
+        if (!loader.isFile()) {
+            throw new IOException(
+                "CARAVEL PRoot loader is not available"
+            );
+        }
+
+        mkdirs(l2sDir);
+
+        java.util.List<String> args = new java.util.ArrayList<>();
+        args.add(proot.getAbsolutePath());
+        args.add("--link2symlink");
+        args.add("--change-id=0:0");
+        args.add("--rootfs=" + destination.getAbsolutePath());
+        args.add("--bind=/dev");
+        args.add("--bind=/proc");
+        args.add("--bind=/sys");
+        args.add("--bind=/system");
+        args.add("--bind=/apex");
+        args.add(
+            "--bind=" +
+            cache.getAbsolutePath() +
+            ":/caravel-cache"
+        );
+        args.add("-w");
+        args.add("/");
+        args.add("/system/bin/toybox");
+        args.add("tar");
+        args.add("-xzf");
+        args.add("/caravel-cache/" + tarball.getName());
+        args.add("-C");
+        args.add("/");
+
+        ProcessBuilder pb = new ProcessBuilder(args);
+        pb.directory(destination);
         pb.redirectErrorStream(true);
+
+        java.util.Map<String, String> env = pb.environment();
+        env.put("PROOT_NO_SECCOMP", "1");
+        env.put(
+            "PROOT_L2S_DIR",
+            l2sDir.getAbsolutePath()
+        );
+        env.put(
+            "PROOT_TMP_DIR",
+            runtime.cacheDir().getAbsolutePath()
+        );
+        env.put(
+            "TMPDIR",
+            runtime.cacheDir().getAbsolutePath()
+        );
+        env.put(
+            "PROOT_LOADER",
+            loader.getAbsolutePath()
+        );
+        env.put(
+            "PATH",
+            "/system/bin:/system/xbin"
+        );
+        env.put(
+            "HOME",
+            "/root"
+        );
+        env.put(
+            "TERM",
+            "xterm-256color"
+        );
 
         try {
             Process process = pb.start();
             String output = readProcessOutput(process);
             int exit = process.waitFor();
 
-            if (exit == 0) {
-                return;
+            if (exit != 0) {
+                throw new IOException(
+                    "Ubuntu extraction failed (exit " + exit + ")" +
+                    (output.isEmpty() ? "" : ": " + tail(output))
+                );
             }
-
-            int repaired = repairDeniedHardLinks(output, destination);
-
-            if (repairMessagesContainOnlyExpectedHardLinkErrors(output, repaired)) {
-                return;
-            }
-
-            throw new IOException(
-                "Ubuntu extraction failed (exit " + exit + ")" +
-                (output.isEmpty() ? "" : ": " + tail(output))
-            );
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException(
@@ -442,98 +508,6 @@ public final class UbuntuManager {
         }
     }
 
-    private static final Pattern HARD_LINK_ERROR =
-        Pattern.compile(
-            "tar: can't link '([^']+)' -> '([^']+)': Permission denied"
-        );
-
-    private static int repairDeniedHardLinks(
-        String output,
-        File destination
-    ) throws IOException {
-
-        Matcher matcher = HARD_LINK_ERROR.matcher(output);
-        int repaired = 0;
-
-        while (matcher.find()) {
-            File source = safeResolve(destination, matcher.group(1));
-            File target = safeResolve(destination, matcher.group(2));
-
-            if (!source.isFile()) {
-                throw new IOException(
-                    "Ubuntu hard-link target missing during repair: " +
-                    matcher.group(1)
-                );
-            }
-
-            File parent = target.getParentFile();
-
-            if (parent != null) {
-                mkdirs(parent);
-            }
-
-            Files.deleteIfExists(target.toPath());
-            Files.copy(
-                source.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.COPY_ATTRIBUTES
-            );
-
-            repaired++;
-        }
-
-        return repaired;
-    }
-
-    private static boolean repairMessagesContainOnlyExpectedHardLinkErrors(
-        String output,
-        int repaired
-    ) {
-        if (repaired == 0) {
-            return false;
-        }
-
-        String[] lines = output.split("\\R");
-        int expected = 0;
-
-        for (String line : lines) {
-            if (line.trim().isEmpty()) {
-                continue;
-            }
-
-            if (HARD_LINK_ERROR.matcher(line).matches()) {
-                expected++;
-                continue;
-            }
-
-            if (line.trim().equals("tar: had errors")) {
-                continue;
-            }
-
-            return false;
-        }
-
-        return expected == repaired;
-    }
-
-    private static File safeResolve(
-        File destination,
-        String relative
-    ) throws IOException {
-
-        Path base = destination.toPath().toAbsolutePath().normalize();
-        Path resolved = base.resolve(relative).normalize();
-
-        if (!resolved.startsWith(base)) {
-            throw new IOException(
-                "Unsafe Ubuntu archive path: " + relative
-            );
-        }
-
-        return resolved.toFile();
-    }
-
     private void prepareRootfs(File dir) throws IOException {
         File etc = new File(dir, "etc");
         mkdirs(etc);
@@ -541,13 +515,13 @@ public final class UbuntuManager {
         File resolv = new File(etc, "resolv.conf");
 
         if (resolv.exists() ||
-            Files.isSymbolicLink(resolv.toPath())) {
-            Files.deleteIfExists(resolv.toPath());
+            java.nio.file.Files.isSymbolicLink(resolv.toPath())) {
+            java.nio.file.Files.deleteIfExists(resolv.toPath());
         }
 
         writeText(resolv, buildResolvConf());
 
-        File environment = new File(dir, "etc/environment");
+        File environment = new File(etc, "environment");
 
         if (!environment.isFile()) {
             writeText(environment, "");
@@ -602,7 +576,7 @@ public final class UbuntuManager {
                         !dns.getHostAddress().isEmpty()) {
                         out.append("nameserver ")
                             .append(dns.getHostAddress())
-                            .append('\\n');
+                            .append('\n');
                     }
                 }
             }
@@ -611,8 +585,8 @@ public final class UbuntuManager {
         }
 
         if (out.length() == 0) {
-            out.append("nameserver 1.1.1.1\\n")
-                .append("nameserver 8.8.8.8\\n");
+            out.append("nameserver 1.1.1.1\n")
+                .append("nameserver 8.8.8.8\n");
         }
 
         return out.toString();
@@ -634,12 +608,12 @@ public final class UbuntuManager {
             int n;
 
             while ((n = in.read(buffer)) != -1) {
-                if (output.length() < 262144) {
+                if (output.length() < 32768) {
                     output.append(
                         new String(
                             buffer,
                             0,
-                            Math.min(n, 262144 - output.length()),
+                            Math.min(n, 32768 - output.length()),
                             StandardCharsets.UTF_8
                         )
                     );
@@ -694,7 +668,7 @@ public final class UbuntuManager {
         }
 
         if (file.isDirectory() &&
-            !Files.isSymbolicLink(file.toPath())) {
+            !java.nio.file.Files.isSymbolicLink(file.toPath())) {
 
             File[] children = file.listFiles();
 
