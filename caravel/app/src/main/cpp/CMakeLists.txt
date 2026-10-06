@@ -97,6 +97,7 @@ target_include_directories(caravel_bit7z
     PRIVATE
         ${BIT7Z_ROOT}/include/bit7z
         ${BIT7Z_ROOT}/src
+        ${SEVENZIP_ROOT}/CPP
 )
 
 target_compile_definitions(caravel_bit7z
@@ -129,6 +130,7 @@ target_include_directories(caravel_7z_jni PRIVATE
     ${BIT7Z_ROOT}/include
     ${BIT7Z_ROOT}/include/bit7z
     ${BIT7Z_ROOT}/src
+    ${SEVENZIP_ROOT}/CPP
 )
 
 target_link_libraries(
