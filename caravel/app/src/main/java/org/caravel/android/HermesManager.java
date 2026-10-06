@@ -637,13 +637,15 @@ public final class HermesManager {
         }
 
         ProcessBuilder pb = new ProcessBuilder(
-            busybox.getAbsolutePath(),
-            "tar",
-            "-xzf",
-            tarball.getAbsolutePath(),
-            "-C",
-            destination.getAbsolutePath(),
-            "--strip-components=1"
+            "/system/bin/sh",
+            "-c",
+            "exec -a busybox \"" +
+            busybox.getAbsolutePath() +
+            "\" tar -xzf \"" +
+            tarball.getAbsolutePath() +
+            "\" -C \"" +
+            destination.getAbsolutePath() +
+            "\" --strip-components=1"
         );
 
         pb.redirectErrorStream(true);
