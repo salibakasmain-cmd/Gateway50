@@ -159,33 +159,9 @@ jobs:
             sha256sum "$JNI_DIR/$lib"
           done
 
-      - name: Prepare pinned Hermes dashboard source
-        shell: bash
-        run: |
-          set -euo pipefail
-          HERMES_ROOT="$RUNNER_TEMP/hermes-agent"
-          HERMES_COMMIT="345cd2b057a452236de401d3534b8502a7465e8d"
-          curl -fL --retry 3 --retry-all-errors "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/$HERMES_COMMIT" -o "$RUNNER_TEMP/hermes-agent.tar.gz"
-          mkdir -p "$HERMES_ROOT"
-          tar -xzf "$RUNNER_TEMP/hermes-agent.tar.gz" --strip-components=1 -C "$HERMES_ROOT"
-          grep -q 'version = "0.21.3"' "$HERMES_ROOT/pyproject.toml"
-          grep -q 'requires-python = ">=3.11,<3.14"' "$HERMES_ROOT/pyproject.toml"
-
-      - name: Set up Node for dashboard build
-        uses: actions/setup-node@v5
-        with:
-          node-version: "24.21.0"
-
-      - name: Build Hermes dashboard frontend
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/hermes-agent"
-          npm ci
-          npm run build --workspace web
-          test -f hermes_cli/web_dist/index.html
-          mkdir -p "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web"
-          cp -a hermes_cli/web_dist/. "$GITHUB_WORKSPACE/caravel/app/src/main/assets/hermes-web/"
+      # Hermes is shipped as a prebuilt Android/ARM64 rootfs overlay.
+      # Do not build or install Hermes from source in the CARAVEL build.
+      # The runtime downloads the pinned Xermes release layers on-device.
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -208,7 +184,6 @@ jobs:
           done
           ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libqroot"
           ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libtermux.so"
-          unzip -l "$APK" | grep -q "assets/hermes-web/index.html"
           stat -c '%s bytes' "$APK"
           sha256sum "$APK"
 
