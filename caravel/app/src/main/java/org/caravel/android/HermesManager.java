@@ -9,27 +9,50 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 public final class HermesManager {
-    public static final String VERSION = "0.21.3";
-    public static final String COMMIT =
-        "345cd2b057a452236de401d3534b8502a7465e8d";
+    /*
+     * CARAVEL follows the prebuilt layered runtime used by Hermes 3.8:
+     * Ubuntu is the base rootfs, then Lite -> Standard -> Full overlays.
+     *
+     * This is intentionally a release identifier, not a claimed semantic
+     * Hermes Agent source version. The release assets are the runtime.
+     */
+    public static final String VERSION = "2026.08.14-1714";
+    public static final String RELEASE_TAG =
+        "v" + VERSION;
 
-    public static final String SOURCE_URL =
-        "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/" +
-        COMMIT;
+    private static final String ARM64_PREFIX =
+        "arm64-v8a-";
 
-    public static final String NODE_TARGET_MAJOR = "22";
+    private static final int TARGET_LAYER_RANK = 1; // Standard
+
+    private static final String LITE_MD5 =
+        "ebe6f17c7c6ab81631070479f3e5a393";
+    private static final String STANDARD_MD5 =
+        "50a3f0b972b92eb18a818fd770209170";
+    private static final String FULL_MD5 =
+        "537c669aa54de416102fc0fb9b6e1d13";
+
+    private static final String LITE_URL =
+        "https://github.com/goldenduo/XermesRelease/releases/download/" +
+        RELEASE_TAG + "/" + ARM64_PREFIX + "lite.7z";
+    private static final String STANDARD_URL =
+        "https://github.com/goldenduo/XermesRelease/releases/download/" +
+        RELEASE_TAG + "/" + ARM64_PREFIX + "standard.7z";
+    private static final String FULL_URL =
+        "https://github.com/goldenduo/XermesRelease/releases/download/" +
+        RELEASE_TAG + "/" + ARM64_PREFIX + "full.7z";
 
     public static final int GATEWAY_PORT = 8642;
     public static final int DASHBOARD_PORT = 9119;
@@ -39,11 +62,11 @@ public final class HermesManager {
     private final PrCliRuntime runtime;
 
     private final File root;
-    private final File source;
-    private final File web;
-    private final File home;
-    private final File archive;
-    private final File partial;
+    private final File legacyHome;
+    private final File workspace;
+    private final File guestHome;
+    private final File guestAgent;
+    private final File guestWeb;
 
     public HermesManager(Context context) {
         this.context = context.getApplicationContext();
@@ -54,51 +77,115 @@ public final class HermesManager {
             this.context.getFilesDir(),
             "caravel/hermes"
         );
-        this.source = new File(root, "source");
-        this.home = new File(root, "home");
-        this.web = new File(home, "web_dist");
 
-        this.archive = new File(
-            root,
-            "hermes-" + VERSION + ".tar.gz"
+        /*
+         * ProviderStore keeps the encrypted API key in Android Keystore-backed
+         * preferences and persists its Hermes config under this host path.
+         * We synchronize these files into the real guest ~/.hermes before
+         * launching Hermes, rather than bind-mounting over the whole guest
+         * ~/.hermes directory.
+         */
+        this.legacyHome = new File(root, "home");
+
+        this.workspace = new File(
+            this.context.getFilesDir(),
+            "caravel/workspace"
         );
-        this.partial = new File(
-            archive.getPath() + ".part"
+
+        this.guestHome = new File(
+            this.ubuntu.rootfs(),
+            "root/.hermes"
+        );
+        this.guestAgent = new File(
+            this.ubuntu.rootfs(),
+            "usr/local/lib/hermes-agent"
+        );
+        this.guestWeb = new File(
+            guestHome,
+            "web_dist"
         );
     }
 
+    public enum Layer {
+        LITE(
+            0,
+            "lite.7z",
+            LITE_URL,
+            LITE_MD5,
+            ".hermes_lite_installed"
+        ),
+        STANDARD(
+            1,
+            "standard.7z",
+            STANDARD_URL,
+            STANDARD_MD5,
+            ".hermes_standard_installed"
+        ),
+        FULL(
+            2,
+            "full.7z",
+            FULL_URL,
+            FULL_MD5,
+            ".hermes_full_installed"
+        );
+
+        final int rank;
+        final String artifact;
+        final String url;
+        final String md5;
+        final String marker;
+
+        Layer(
+            int rank,
+            String artifact,
+            String url,
+            String md5,
+            String marker
+        ) {
+            this.rank = rank;
+            this.artifact = artifact;
+            this.url = url;
+            this.md5 = md5;
+            this.marker = marker;
+        }
+    }
+
     public boolean isInstalled() {
-        return new File(
-            source,
-            ".hermes_installed"
-        ).isFile()
-            && new File(
-                home,
-                ".caravel_pm_node_ready"
-            ).isFile()
+        return layerInstalled(Layer.STANDARD)
             && new File(
                 ubuntu.rootfs(),
                 "usr/local/bin/hermes"
             ).isFile()
             && new File(
-                ubuntu.rootfs(),
-                "usr/local/lib/hermes-venv/bin/hermes"
+                guestAgent,
+                "venv/bin/python3"
             ).isFile();
     }
 
     public File sourceDir() {
-        return source;
+        return guestAgent;
     }
 
     public File webDir() {
-        return web;
+        return guestWeb;
     }
 
     public File homeDir() {
-        return home;
+        return legacyHome;
     }
 
     public void install(Progress progress) throws IOException {
+        install(Layer.STANDARD, progress);
+    }
+
+    public void installFull(Progress progress) throws IOException {
+        install(Layer.FULL, progress);
+    }
+
+    public void install(
+        Layer target,
+        Progress progress
+    ) throws IOException {
         if (!ubuntu.isInstalled()) {
             throw new IOException(
                 "Ubuntu must be installed before Hermes"
@@ -107,167 +194,311 @@ public final class HermesManager {
 
         runtime.ensureLayout();
         root.mkdirs();
-        home.mkdirs();
-        source.getParentFile().mkdirs();
+        if (!legacyHome.exists() &&
+            !legacyHome.mkdirs() &&
+            !legacyHome.isDirectory()) {
+            throw new IOException(
+                "Unable to create CARAVEL Hermes host state"
+            );
+        }
 
-        prepareWebAssets(progress);
-        ensureRuntimeFiles();
-
-        if (isInstalled()) {
-            if (progress != null) {
-                progress.onProgress(
-                    "Hermes Agent " + VERSION +
-                    " already installed",
-                    100
-                );
-            }
-            return;
+        if (target == null) {
+            target = Layer.STANDARD;
         }
 
         if (progress != null) {
             progress.onProgress(
-                "Downloading Hermes Agent " + VERSION,
+                "Preparing prebuilt Hermes " + targetName(target),
                 0
             );
         }
 
-        download(archive, progress);
+        /*
+         * Install missing dependencies in rank order:
+         * Ubuntu -> Lite -> Standard -> Full.
+         */
+        for (Layer layer : Layer.values()) {
+            if (layer.rank > target.rank) {
+                break;
+            }
 
-        File staging = new File(
-            root,
-            "source.new"
+            if (!layerInstalled(layer)) {
+                installLayer(layer, target, progress);
+            }
+        }
+
+        prepareWebAssets(progress);
+        ensureRuntimeFiles();
+        validateGuestRuntime(progress);
+
+        /*
+         * Remove the old source-install leftovers from earlier CARAVEL
+         * revisions. The actual runtime now lives inside the Ubuntu rootfs.
+         */
+        deleteRecursive(
+            new File(root, "source")
         );
-        deleteRecursive(staging);
+        deleteRecursive(
+            new File(root, "source.new")
+        );
+        deleteRecursive(
+            new File(root, "source.old")
+        );
 
-        if (!staging.mkdirs() && !staging.isDirectory()) {
+        if (progress != null) {
+            progress.onProgress(
+                "Hermes prebuilt " + targetName(target) + " ready",
+                100
+            );
+        }
+    }
+
+    private void installLayer(
+        Layer layer,
+        Layer target,
+        Progress progress
+    ) throws IOException {
+        File archives = new File(root, "layers");
+        if (!archives.isDirectory() &&
+            !archives.mkdirs() &&
+            !archives.isDirectory()) {
             throw new IOException(
-                "Unable to create Hermes staging directory"
+                "Unable to create Hermes download directory"
+            );
+        }
+
+        File archive = new File(
+            archives,
+            layer.artifact
+        );
+
+        int basePercent =
+            layer.rank == 0
+                ? 5
+                : layer.rank == 1
+                    ? 40
+                    : 72;
+
+        if (progress != null) {
+            progress.onProgress(
+                "Hermes " + targetName(layer) +
+                " layer: checking archive",
+                basePercent
+            );
+        }
+
+        if (!hasValidDigest(archive, layer.md5)) {
+            if (archive.isFile() && !archive.delete()) {
+                throw new IOException(
+                    "Unable to replace invalid Hermes archive: " +
+                    archive
+                );
+            }
+
+            if (progress != null) {
+                progress.onProgress(
+                    "Downloading Hermes " +
+                    targetName(layer) + " layer",
+                    basePercent
+                );
+            }
+
+            download(
+                archive,
+                new File(archive.getPath() + ".part"),
+                layer.url,
+                layer.md5,
+                basePercent,
+                Math.min(
+                    30,
+                    layer.rank == 0 ? 32 :
+                    layer.rank == 1 ? 30 : 22
+                ),
+                progress
+            );
+        }
+
+        if (!hasValidDigest(archive, layer.md5)) {
+            throw new IOException(
+                "Hermes " + targetName(layer) +
+                " archive failed MD5 verification"
             );
         }
 
         if (progress != null) {
             progress.onProgress(
-                "Extracting Hermes source",
-                35
+                "Extracting Hermes " + targetName(layer) +
+                " into Ubuntu",
+                basePercent + 26
             );
         }
 
-        extractArchive(archive, staging);
-
-        File pyproject = new File(
-            staging,
-            "pyproject.toml"
+        /*
+         * The archive is itself a rootfs overlay. Extract directly into the
+         * installed Ubuntu rootfs so POSIX symlinks and permissions are
+         * materialized by the native 7-Zip path that already passed the
+         * Ubuntu ARM64 self-test on the M14.
+         */
+        Native7z.extract(
+            context,
+            archive,
+            ubuntu.rootfs(),
+            ""
         );
 
-        if (!pyproject.isFile()) {
-            throw new IOException(
-                "Hermes source archive is missing pyproject.toml"
+        if (progress != null) {
+            progress.onProgress(
+                "Verifying Hermes " + targetName(layer) +
+                " runtime",
+                basePercent + 29
             );
         }
 
-        String metadata = readText(pyproject);
+        validateLayer(layer);
 
-        if (!metadata.contains(
-            "version = \"" + VERSION + "\""
-        )) {
-            throw new IOException(
-                "Hermes source version mismatch"
-            );
-        }
-
-        File old = new File(
-            root,
-            "source.old"
+        writeText(
+            new File(
+                ubuntu.rootfs(),
+                layer.marker
+            ),
+            "release=" + RELEASE_TAG + "\n" +
+            "layer=" + layer.name().toLowerCase(Locale.US) + "\n" +
+            "artifact=" + layer.artifact + "\n" +
+            "md5=" + layer.md5 + "\n"
         );
-        deleteRecursive(old);
 
-        if (source.exists() &&
-            !source.renameTo(old)) {
+        /*
+         * Keep the successful layer out of app storage. If extraction fails,
+         * the archive is deliberately retained so the next attempt can retry
+         * without another download.
+         */
+        if (!archive.delete() && archive.isFile()) {
             throw new IOException(
-                "Unable to stage existing Hermes source"
+                "Unable to remove Hermes archive cache: " +
+                archive
             );
         }
 
-        boolean activated = false;
+        File partial =
+            new File(archive.getPath() + ".part");
+        partial.delete();
 
-        try {
-            if (!staging.renameTo(source)) {
-                throw new IOException(
-                    "Unable to activate Hermes source"
-                );
-            }
+        if (progress != null) {
+            int done =
+                layer.rank == 0 ? 37 :
+                layer.rank == 1 ? 69 : 94;
 
-            activated = true;
+            progress.onProgress(
+                "Hermes " + targetName(layer) + " installed",
+                done
+            );
+        }
+    }
 
-            if (progress != null) {
-                progress.onProgress(
-                    "Installing Hermes in Ubuntu",
-                    50
-                );
-            }
+    private void validateLayer(Layer layer) throws IOException {
+        File rootfs = ubuntu.rootfs();
 
-            installIntoUbuntu(progress);
-            ensureRuntimeFiles();
+        if (!new File(
+            rootfs,
+            layer.marker
+        ).exists()) {
+            /*
+             * The marker is intentionally checked by isInstalled() only
+             * after validateLayer() finishes; no marker is needed here.
+             */
+        }
 
-            writeText(
+        if (layer.rank >= Layer.LITE.rank) {
+            requireFile(
+                new File(rootfs, "usr/local/bin/hermes"),
+                "Hermes launcher"
+            );
+            requireFile(
                 new File(
-                    source,
-                    ".hermes_installed"
+                    rootfs,
+                    "usr/local/lib/hermes-agent"
                 ),
-                "Hermes Agent " + VERSION + "\n" +
-                "commit=" + COMMIT + "\n"
+                "Hermes agent root"
             );
+        }
 
-            deleteRecursive(old);
+        if (layer.rank >= Layer.STANDARD.rank) {
+            requireFile(
+                new File(
+                    rootfs,
+                    "usr/local/lib/hermes-agent/venv/bin/python3"
+                ),
+                "Hermes bundled Python"
+            );
+        }
 
-            archive.delete();
-            partial.delete();
+        if (layer.rank >= Layer.FULL.rank) {
+            requireFile(
+                new File(
+                    rootfs,
+                    "root/.hermes"
+                ),
+                "Hermes persistent home"
+            );
+        }
+    }
 
-            if (progress != null) {
-                progress.onProgress(
-                    "Hermes Agent installed",
-                    100
-                );
-            }
-        } catch (IOException e) {
-            if (activated) {
-                try {
-                    deleteRecursive(source);
-                } catch (IOException cleanup) {
-                    e.addSuppressed(cleanup);
-                }
-            }
+    private boolean layerInstalled(Layer layer) {
+        return new File(
+            ubuntu.rootfs(),
+            layer.marker
+        ).isFile();
+    }
 
-            if (old.exists() &&
-                !old.renameTo(source)) {
-                e.addSuppressed(
-                    new IOException(
-                        "Unable to restore previous Hermes source"
-                    )
-                );
-            }
-
-            throw e;
+    private void requireFile(
+        File file,
+        String label
+    ) throws IOException {
+        if (!file.exists()) {
+            throw new IOException(
+                label + " is missing after Hermes extraction: " +
+                file
+            );
         }
     }
 
     public void ensureRuntimeFiles() throws IOException {
         runtime.ensureLayout();
 
-        if (!home.exists() && !home.mkdirs()) {
+        if (!legacyHome.exists() &&
+            !legacyHome.mkdirs() &&
+            !legacyHome.isDirectory()) {
             throw new IOException(
-                "Unable to create Hermes home"
+                "Unable to create Hermes host state"
             );
         }
 
-        File env = new File(
-            home,
+        if (!guestHome.exists() &&
+            !guestHome.mkdirs() &&
+            !guestHome.isDirectory()) {
+            throw new IOException(
+                "Unable to create Hermes guest home"
+            );
+        }
+
+        File hostEnv = new File(
+            legacyHome,
+            ".env"
+        );
+        File guestEnv = new File(
+            guestHome,
             ".env"
         );
 
-        String existing = env.isFile()
-            ? readText(env).replace("\\n", "\n")
-            : "";
+        String existing;
+
+        if (hostEnv.isFile()) {
+            existing = readText(hostEnv).replace("\\n", "\n");
+        } else if (guestEnv.isFile()) {
+            existing = readText(guestEnv).replace("\\n", "\n");
+        } else {
+            existing = "";
+        }
 
         String apiKey = findEnvValue(
             existing,
@@ -299,7 +530,21 @@ public final class HermesManager {
             apiKey
         );
 
-        writeText(env, updated);
+        writeText(hostEnv, updated);
+        writeText(guestEnv, updated);
+
+        File hostConfig = new File(
+            legacyHome,
+            "config.yaml"
+        );
+        File guestConfig = new File(
+            guestHome,
+            "config.yaml"
+        );
+
+        if (hostConfig.isFile()) {
+            copyFile(hostConfig, guestConfig);
+        }
     }
 
     public Process startGateway() throws IOException {
@@ -312,9 +557,7 @@ public final class HermesManager {
         ensureRuntimeFiles();
 
         String command =
-            "export HERMES_HOME=/root/.hermes; " +
-            "export PATH=/root/.hermes/node/bin:/usr/local/lib/hermes-agent/venv/bin:" +
-            "/usr/local/bin:$PATH; " +
+            commonEnvironment() +
             "cd /root/workspace && " +
             "exec /usr/local/bin/hermes " +
             "gateway run --external-supervisor";
@@ -334,11 +577,10 @@ public final class HermesManager {
         }
 
         ensureRuntimeFiles();
+        prepareWebAssets(null);
 
         String command =
-            "export HERMES_HOME=/root/.hermes; " +
-            "export PATH=/root/.hermes/node/bin:/usr/local/lib/hermes-venv/bin:" +
-            "/usr/local/bin:$PATH; " +
+            commonEnvironment() +
             "export HERMES_WEB_DIST=/root/.hermes/web_dist; " +
             "cd /root/workspace && " +
             "exec /usr/local/bin/hermes " +
@@ -353,6 +595,178 @@ public final class HermesManager {
         );
     }
 
+    private String commonEnvironment() {
+        return
+            "export HOME=/root; " +
+            "export USER=root; " +
+            "export TERM=xterm-256color; " +
+            "export LANG=en_US.UTF-8; " +
+            "export HERMES_HOME=/root/.hermes; " +
+            "export HERMES_BIN=/usr/local/bin/hermes; " +
+            "export HERMES_AGENT_ROOT=/usr/local/lib/hermes-agent; " +
+            "export HERMES_AGENT_BRIDGE_PYTHON=/usr/local/lib/hermes-agent/venv/bin/python3; " +
+            "export PYTHONPATH=/usr/local/lib/hermes-agent; " +
+            "export HERMES_DISABLE_LAZY_INSTALLS=1; " +
+            "export PATH=/usr/local/lib/hermes-agent/venv/bin:/usr/local/bin:" +
+            "/root/.hermes/node/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin; " +
+            "export QROOT_STUB_BLOCK_TARGET_SECCOMP=1; " +
+            "export QROOT_LOOPBACK_UNIX=1; " +
+            "export QROOT_LOOPBACK_NAMESPACE=hermes-agent; " +
+            "export HERMES_TUI_RPC_TIMEOUT_MS=600000; " +
+            "export HERMES_TUI_STARTUP_TIMEOUT_MS=60000; " +
+            "export HERMES_TUI_RPC_POOL_WORKERS=4; ";
+    }
+
+    private List<String> runtimeBinds() {
+        List<String> binds = new ArrayList<>();
+
+        /*
+         * Keep the workspace shared between CARAVEL and the guest, but do
+         * not bind-mount ~/.hermes or /usr/local/lib/hermes-agent: those are
+         * part of the prebuilt runtime layer itself.
+         */
+        if (!workspace.isDirectory()) {
+            workspace.mkdirs();
+        }
+
+        binds.add(
+            workspace.getAbsolutePath() +
+            ":/root/workspace"
+        );
+
+        return binds;
+    }
+
+    private void prepareWebAssets(
+        Progress progress
+    ) throws IOException {
+        /*
+         * Prefer the web_dist bundled in the prebuilt layer. Only fall back
+         * to CARAVEL APK assets when the layer does not contain it.
+         */
+        if (new File(
+            guestWeb,
+            "index.html"
+        ).isFile()) {
+            return;
+        }
+
+        if (!guestWeb.exists() &&
+            !guestWeb.mkdirs() &&
+            !guestWeb.isDirectory()) {
+            throw new IOException(
+                "Unable to create Hermes dashboard asset directory"
+            );
+        }
+
+        if (progress != null) {
+            progress.onProgress(
+                "Installing bundled Hermes dashboard assets",
+                96
+            );
+        }
+
+        copyAssetTree(
+            context.getAssets(),
+            "hermes-web",
+            guestWeb
+        );
+
+        if (!new File(
+            guestWeb,
+            "index.html"
+        ).isFile()) {
+            throw new IOException(
+                "Hermes dashboard assets are missing"
+            );
+        }
+    }
+
+    private void copyAssetTree(
+        AssetManager assets,
+        String assetPath,
+        File destination
+    ) throws IOException {
+        String[] children =
+            assets.list(assetPath);
+
+        if (children == null ||
+            children.length == 0) {
+            try (
+                InputStream in =
+                    assets.open(assetPath);
+                FileOutputStream out =
+                    new FileOutputStream(destination)
+            ) {
+                copy(in, out);
+            }
+            return;
+        }
+
+        if (!destination.exists() &&
+            !destination.mkdirs() &&
+            !destination.isDirectory()) {
+            throw new IOException(
+                "Unable to create " + destination
+            );
+        }
+
+        for (String child : children) {
+            copyAssetTree(
+                assets,
+                assetPath + "/" + child,
+                new File(destination, child)
+            );
+        }
+    }
+
+    private void validateGuestRuntime(
+        Progress progress
+    ) throws IOException {
+        requireFile(
+            new File(
+                ubuntu.rootfs(),
+                "usr/local/bin/hermes"
+            ),
+            "Hermes launcher"
+        );
+        requireFile(
+            new File(
+                ubuntu.rootfs(),
+                "usr/local/lib/hermes-agent/venv/bin/python3"
+            ),
+            "Hermes Python"
+        );
+
+        String command =
+            commonEnvironment() +
+            "set -eu; " +
+            "test -x /usr/local/bin/hermes; " +
+            "test -x /usr/local/lib/hermes-agent/venv/bin/python3; " +
+            "v=\"$(/usr/local/lib/hermes-agent/venv/bin/python3 --version)\"; " +
+            "echo \"CARAVEL_HERMES_PYTHON_OK $v\"; " +
+            "/usr/local/bin/hermes --version";
+
+        Process process = runtime.runInDistro(
+            "ubuntu",
+            command,
+            runtimeBinds()
+        );
+
+        int exit = waitAndDrain(
+            process,
+            progress,
+            "Hermes runtime check"
+        );
+
+        if (exit != 0) {
+            throw new IOException(
+                "Prebuilt Hermes runtime validation failed (exit " +
+                exit + ")"
+            );
+        }
+    }
+
     public String gatewayHealthUrl() {
         return "http://127.0.0.1:" +
             GATEWAY_PORT +
@@ -363,13 +777,15 @@ public final class HermesManager {
         ensureRuntimeFiles();
 
         File env = new File(
-            home,
+            guestHome,
             ".env"
         );
 
-        String content = readText(env).replace("\\n", "\n");
+        String content = readText(env)
+            .replace("\\n", "\n");
 
-        for (String line : content.split("\\R")) {
+        for (String line :
+            content.split("\\R")) {
             if (line.startsWith("API_SERVER_KEY=")) {
                 return line.substring(
                     "API_SERVER_KEY=".length()
@@ -382,26 +798,12 @@ public final class HermesManager {
         );
     }
 
-    private List<String> runtimeBinds() {
-        List<String> binds = new ArrayList<>();
-
-        binds.add(
-            source.getAbsolutePath() +
-            ":/usr/local/lib/hermes-agent"
-        );
-        binds.add(
-            home.getAbsolutePath() +
-            ":/root/.hermes"
-        );
-
-        return binds;
-    }
-
     private static String findEnvValue(
         String content,
         String key
     ) {
-        for (String line : content.split("\\R")) {
+        for (String line :
+            content.split("\\R")) {
             if (line.startsWith(key + "=")) {
                 return line.substring(
                     key.length() + 1
@@ -416,8 +818,12 @@ public final class HermesManager {
         String key,
         String value
     ) {
-        String[] lines = content.split("\\R", -1);
-        StringBuilder out = new StringBuilder();
+        String[] lines =
+            content.split("\\R", -1);
+
+        StringBuilder out =
+            new StringBuilder();
+
         boolean replaced = false;
 
         for (String line : lines) {
@@ -432,7 +838,8 @@ public final class HermesManager {
                 continue;
             }
 
-            if (!line.isEmpty() || out.length() > 0) {
+            if (!line.isEmpty() ||
+                out.length() > 0) {
                 out.append(line).append('\n');
             }
         }
@@ -467,328 +874,228 @@ public final class HermesManager {
         return out.toString();
     }
 
-    private void installIntoUbuntu(
-        Progress progress
-    ) throws IOException {
-        String command =
-            "set -e; " +
-            "export HERMES_HOME=/root/.hermes; " +
-            "export HERMES_NODE_TARGET_MAJOR=" +
-            NODE_TARGET_MAJOR +
-            "; " +
-            "export DEBIAN_FRONTEND=noninteractive; " +
-            "apt-get update; " +
-            "apt-get install -y " +
-            "ca-certificates curl python3 python3-venv " +
-            "python3-pip git ripgrep tar gzip bash; " +
-            "mkdir -p /usr/local/lib/hermes-agent; " +
-            "rm -rf /usr/local/lib/hermes-venv; " +
-            "python3 -m venv /usr/local/lib/hermes-venv; " +
-            "/usr/local/lib/hermes-venv/bin/python -m pip " +
-            "install --no-cache-dir --upgrade pip; " +
-            "/usr/local/lib/hermes-venv/bin/python -m pip " +
-            "install --no-cache-dir " +
-            "-e '/usr/local/lib/hermes-agent[web,pty]'; " +
-            "ln -sf /usr/local/lib/hermes-venv/bin/hermes " +
-            "/usr/local/bin/hermes; " +
-            "test -x /usr/local/bin/hermes; " +
-            "source /usr/local/lib/hermes-agent/scripts/lib/node-bootstrap.sh; " +
-            "ensure_node; " +
-            "test -x /root/.hermes/node/bin/node; " +
-            "test -x /root/.hermes/node/bin/npm; " +
-            "v=\"$(/root/.hermes/node/bin/node --version)\"; " +
-            "case \"$v\" in v${HERMES_NODE_TARGET_MAJOR}.*) ;; " +
-            "*) echo \"Unexpected Node version: $v\" >&2; exit 1 ;; esac; " +
-            "echo \"CARAVEL_NODE_OK $v\"; " +
-            "touch /root/.hermes/.caravel_pm_node_ready; " +
-            "test -x /usr/local/bin/hermes; " +
-            "/usr/local/lib/hermes-venv/bin/python --version; " +
-            "/usr/local/bin/hermes --version";
-
-        Process process = runtime.runInDistro(
-            "ubuntu",
-            command,
-            runtimeBinds()
-        );
-
-        int exit = waitAndDrain(
-            process,
-            progress,
-            "Hermes setup"
-        );
-
-        if (exit != 0) {
-            throw new IOException(
-                "Hermes dependency installation failed (exit " +
-                exit +
-                ")"
-            );
-        }
-
-        if (progress != null) {
-            progress.onProgress(
-                "Hermes dependencies and managed Node installed",
-                90
-            );
-        }
-    }
-
-    private void prepareWebAssets(
-        Progress progress
-    ) throws IOException {
-
-        File marker = new File(
-            web,
-            ".caravel-web-" + COMMIT
-        );
-
-        if (marker.isFile() &&
-            new File(web, "index.html").isFile()) {
-            return;
-        }
-
-        deleteRecursive(web);
-
-        if (!web.mkdirs() && !web.isDirectory()) {
-            throw new IOException(
-                "Unable to create Hermes web asset directory"
-            );
-        }
-
-        if (progress != null) {
-            progress.onProgress(
-                "Installing Hermes dashboard assets",
-                20
-            );
-        }
-
-        copyAssetTree(
-            context.getAssets(),
-            "hermes-web",
-            web
-        );
-
-        if (!new File(web, "index.html").isFile()) {
-            throw new IOException(
-                "Hermes dashboard assets are incomplete"
-            );
-        }
-
-        writeText(
-            marker,
-            COMMIT + "\n"
-        );
-    }
-
-    private void copyAssetTree(
-        AssetManager assets,
-        String assetPath,
-        File destination
-    ) throws IOException {
-
-        String[] children =
-            assets.list(assetPath);
-
-        if (children == null ||
-            children.length == 0) {
-
-            try (
-                InputStream in =
-                    assets.open(assetPath);
-                FileOutputStream out =
-                    new FileOutputStream(destination)
-            ) {
-                copy(in, out);
-            }
-
-            return;
-        }
-
-        if (!destination.exists() &&
-            !destination.mkdirs()) {
-
-            throw new IOException(
-                "Unable to create " + destination
-            );
-        }
-
-        for (String child : children) {
-            copyAssetTree(
-                assets,
-                assetPath + "/" + child,
-                new File(destination, child)
-            );
-        }
-    }
-
-    private void extractArchive(
-        File tarball,
-        File destination
-    ) throws IOException {
-        /*
-         * Android's native BusyBox tar is not reliable for this workload:
-         * on some devices it is terminated by the Android seccomp policy.
-         *
-         * CARAVEL already bundles the native 7-Zip/bit7z extraction path
-         * used successfully for Ubuntu. Use that same path for Hermes.
-         *
-         * GitHub codeload tarballs contain a single top-level directory
-         * (hermes-agent-<commit>). Native7z extracts it faithfully, so
-         * flatten that directory into the requested staging directory.
-         */
-        File unpacked = new File(
-            destination.getParentFile(),
-            destination.getName() + ".unpacked"
-        );
-
-        deleteRecursive(unpacked);
-
-        if (!unpacked.mkdirs() && !unpacked.isDirectory()) {
-            throw new IOException(
-                "Unable to create Hermes extraction workspace"
-            );
-        }
-
-        try {
-            Native7z.extract(
-                context,
-                tarball,
-                unpacked,
-                ""
-            );
-
-            File[] children = unpacked.listFiles();
-
-            if (children == null || children.length == 0) {
-                throw new IOException(
-                    "Hermes source archive extracted no files"
-                );
-            }
-
-            File sourceRoot = null;
-
-            if (children.length == 1 &&
-                children[0].isDirectory() &&
-                !java.nio.file.Files.isSymbolicLink(
-                    children[0].toPath()
-                )) {
-                sourceRoot = children[0];
-            }
-
-            File[] entries =
-                sourceRoot != null
-                    ? sourceRoot.listFiles()
-                    : children;
-
-            if (entries == null || entries.length == 0) {
-                throw new IOException(
-                    "Hermes source archive has no source files"
-                );
-            }
-
-            for (File entry : entries) {
-                File target = new File(
-                    destination,
-                    entry.getName()
-                );
-
-                if (!entry.renameTo(target)) {
-                    throw new IOException(
-                        "Unable to activate extracted Hermes entry: " +
-                        entry.getName()
-                    );
-                }
-            }
-        } finally {
-            deleteRecursive(unpacked);
-        }
-    }
-
     private void download(
         File target,
+        File partial,
+        String url,
+        String expectedMd5,
+        int basePercent,
+        int percentSpan,
         Progress progress
     ) throws IOException {
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            long existing =
+                partial.isFile()
+                    ? partial.length()
+                    : 0L;
 
-        partial.delete();
+            HttpURLConnection conn = null;
 
-        HttpURLConnection conn =
-            (HttpURLConnection)new URL(
-                SOURCE_URL
-            ).openConnection();
+            try {
+                conn =
+                    (HttpURLConnection)new URL(url)
+                        .openConnection();
 
-        conn.setConnectTimeout(20000);
-        conn.setReadTimeout(30000);
-        conn.setInstanceFollowRedirects(true);
-        conn.setRequestProperty(
-            "User-Agent",
-            "CARAVEL/" + VERSION
-        );
-
-        try {
-            int code =
-                conn.getResponseCode();
-
-            if (code != HttpURLConnection.HTTP_OK) {
-                throw new IOException(
-                    "Hermes source download failed: HTTP " +
-                    code
+                conn.setConnectTimeout(20000);
+                conn.setReadTimeout(60000);
+                conn.setInstanceFollowRedirects(true);
+                conn.setRequestProperty(
+                    "User-Agent",
+                    "CARAVEL/" + VERSION
                 );
-            }
+                conn.setRequestProperty(
+                    "Accept-Encoding",
+                    "identity"
+                );
 
-            long total =
-                conn.getContentLengthLong();
+                if (existing > 0) {
+                    conn.setRequestProperty(
+                        "Range",
+                        "bytes=" + existing + "-"
+                    );
+                }
+
+                int code =
+                    conn.getResponseCode();
+
+                if (code == 416 && existing > 0) {
+                    partial.delete();
+                    continue;
+                }
+
+                boolean append =
+                    existing > 0 &&
+                    code == HttpURLConnection.HTTP_PARTIAL;
+
+                if (code != HttpURLConnection.HTTP_OK &&
+                    !append) {
+                    throw new IOException(
+                        "Hermes layer download failed: HTTP " +
+                        code
+                    );
+                }
+
+                long contentLength =
+                    conn.getContentLengthLong();
+
+                long total =
+                    contentLength > 0
+                        ? contentLength + (append ? existing : 0)
+                        : -1L;
+
+                if (!append) {
+                    existing = 0L;
+                }
+
+                File parent =
+                    partial.getParentFile();
+
+                if (parent != null) {
+                    mkdirs(parent);
+                }
+
+                try (
+                    InputStream in =
+                        conn.getInputStream();
+                    FileOutputStream out =
+                        new FileOutputStream(
+                            partial,
+                            append
+                        )
+                ) {
+                    byte[] buffer =
+                        new byte[131072];
+
+                    long done = existing;
+                    int n;
+
+                    while ((n = in.read(buffer)) != -1) {
+                        out.write(buffer, 0, n);
+                        done += n;
+
+                        if (progress != null &&
+                            total > 0) {
+
+                            int pct =
+                                basePercent +
+                                (int)Math.min(
+                                    percentSpan,
+                                    (done * percentSpan) / total
+                                );
+
+                            progress.onProgress(
+                                String.format(
+                                    Locale.US,
+                                    "Downloading Hermes layer %d%%",
+                                    (done * 100L) / total
+                                ),
+                                pct
+                            );
+                        }
+                    }
+
+                    out.flush();
+                }
+
+                if (!hasValidDigest(
+                    partial,
+                    expectedMd5
+                )) {
+                    partial.delete();
+                    throw new IOException(
+                        "Hermes layer MD5 mismatch after download"
+                    );
+                }
+
+                target.delete();
+
+                if (!partial.renameTo(target)) {
+                    throw new IOException(
+                        "Unable to finalize Hermes layer archive"
+                    );
+                }
+
+                return;
+            } catch (IOException e) {
+                if (attempt == 4) {
+                    throw e;
+                }
+
+                try {
+                    Thread.sleep(
+                        attempt * 1500L
+                    );
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException(
+                        "Hermes layer download interrupted",
+                        interrupted
+                    );
+                }
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }
+    }
+
+    private static boolean hasValidDigest(
+        File file,
+        String expected
+    ) throws IOException {
+        if (!file.isFile()) {
+            return false;
+        }
+
+        return expected.equalsIgnoreCase(
+            digestHex(file, "MD5")
+        );
+    }
+
+    private static String digestHex(
+        File file,
+        String algorithm
+    ) throws IOException {
+        try {
+            MessageDigest md =
+                MessageDigest.getInstance(algorithm);
 
             try (
                 InputStream in =
-                    conn.getInputStream();
-                FileOutputStream out =
-                    new FileOutputStream(partial)
+                    new FileInputStream(file)
             ) {
                 byte[] buffer =
                     new byte[131072];
 
-                long done = 0;
                 int n;
 
                 while ((n = in.read(buffer)) != -1) {
-                    out.write(buffer, 0, n);
-                    done += n;
-
-                    if (progress != null &&
-                        total > 0) {
-
-                        int pct =
-                            (int)Math.min(
-                                19,
-                                (done * 19L) / total
-                            );
-
-                        progress.onProgress(
-                            String.format(
-                                Locale.US,
-                                "Downloading Hermes %d%%",
-                                (pct * 100) / 19
-                            ),
-                            pct
-                        );
-                    }
+                    md.update(buffer, 0, n);
                 }
-
-                out.flush();
             }
 
-            target.delete();
+            StringBuilder out =
+                new StringBuilder(
+                    md.getDigestLength() * 2
+                );
 
-            if (!partial.renameTo(target)) {
-                throw new IOException(
-                    "Unable to finalize Hermes archive"
+            for (byte b : md.digest()) {
+                out.append(
+                    String.format(
+                        Locale.US,
+                        "%02x",
+                        b
+                    )
                 );
             }
-        } catch (IOException e) {
-            partial.delete();
-            throw e;
-        } finally {
-            conn.disconnect();
+
+            return out.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException(
+                algorithm + " unavailable",
+                e
+            );
         }
     }
 
@@ -797,7 +1104,6 @@ public final class HermesManager {
         Progress progress,
         String label
     ) throws IOException {
-
         final StringBuilder tail =
             new StringBuilder(8192);
 
@@ -806,7 +1112,7 @@ public final class HermesManager {
                 try (
                     BufferedReader in =
                         new BufferedReader(
-                            new java.io.InputStreamReader(
+                            new InputStreamReader(
                                 process.getInputStream(),
                                 StandardCharsets.UTF_8
                             )
@@ -828,8 +1134,7 @@ public final class HermesManager {
                         if (progress != null &&
                             !line.trim().isEmpty()) {
                             progress.onProgress(
-                                label + ": " +
-                                line.trim(),
+                                label + ": " + line.trim(),
                                 -1
                             );
                         }
@@ -837,7 +1142,7 @@ public final class HermesManager {
                 } catch (Exception ignored) {
                 }
             },
-            "caravel-process-output"
+            "caravel-hermes-runtime-check"
         );
 
         reader.start();
@@ -849,10 +1154,32 @@ public final class HermesManager {
         } catch (InterruptedException e) {
             process.destroy();
             Thread.currentThread().interrupt();
+
             throw new IOException(
                 label + " interrupted",
                 e
             );
+        }
+    }
+
+    private static void copyFile(
+        File source,
+        File destination
+    ) throws IOException {
+        File parent =
+            destination.getParentFile();
+
+        if (parent != null) {
+            mkdirs(parent);
+        }
+
+        try (
+            InputStream in =
+                new FileInputStream(source);
+            FileOutputStream out =
+                new FileOutputStream(destination)
+        ) {
+            copy(in, out);
         }
     }
 
@@ -876,7 +1203,6 @@ public final class HermesManager {
         File file,
         String text
     ) throws IOException {
-
         File parent =
             file.getParentFile();
 
@@ -900,7 +1226,6 @@ public final class HermesManager {
     private static String readText(
         File file
     ) throws IOException {
-
         long length = file.length();
 
         if (length > Integer.MAX_VALUE) {
@@ -940,65 +1265,20 @@ public final class HermesManager {
         );
     }
 
-    private static void verifySha256(
-        File file,
-        String expected
-    ) throws IOException {
-
-        try {
-            MessageDigest md =
-                MessageDigest.getInstance(
-                    "SHA-256"
-                );
-
-            try (
-                InputStream in =
-                    new FileInputStream(file)
-            ) {
-                byte[] buffer =
-                    new byte[131072];
-
-                int n;
-
-                while ((n = in.read(buffer)) != -1) {
-                    md.update(buffer, 0, n);
-                }
-            }
-
-            StringBuilder actual =
-                new StringBuilder(64);
-
-            for (byte b : md.digest()) {
-                actual.append(
-                    String.format(
-                        Locale.US,
-                        "%02x",
-                        b
-                    )
-                );
-            }
-
-            if (!expected.equals(
-                actual.toString()
-            )) {
-                throw new IOException(
-                    "SHA-256 mismatch"
-                );
-            }
-        } catch (
-            java.security.NoSuchAlgorithmException e
-        ) {
-            throw new IOException(
-                "SHA-256 unavailable",
-                e
-            );
-        }
+    private static String targetName(
+        Layer layer
+    ) {
+        return layer.name()
+            .substring(0, 1)
+            .toUpperCase(Locale.US) +
+            layer.name()
+                .substring(1)
+                .toLowerCase(Locale.US);
     }
 
     private static void deleteRecursive(
         File file
     ) throws IOException {
-
         if (file == null ||
             !file.exists()) {
             return;
@@ -1008,7 +1288,6 @@ public final class HermesManager {
             !java.nio.file.Files.isSymbolicLink(
                 file.toPath()
             )) {
-
             File[] children =
                 file.listFiles();
 
