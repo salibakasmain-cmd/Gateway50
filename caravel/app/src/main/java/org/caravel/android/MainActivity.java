@@ -208,7 +208,7 @@ public final class MainActivity extends Activity {
         body.addView(hermesState);
 
         hermesEdition = textView(
-            "Choose Lite, Standard, or Full. Select one edition; CARAVEL handles any required base components internally.",
+            "Choose exactly one Hermes edition. CARAVEL downloads only the edition you select.",
             14, muted
         );
         hermesEdition.setPadding(dp(0), dp(0), dp(0), dp(8));
@@ -259,7 +259,7 @@ public final class MainActivity extends Activity {
         body.addView(section("RUNTIME ARCHITECTURE"));
         body.addView(runtimeLine("Android host", "CARAVEL"));
         body.addView(runtimeLine("Linux layer", "Ubuntu ARM64 + Android PRoot engine"));
-        body.addView(runtimeLine("Agent", "Hermes Agent " + HermesManager.VERSION));
+        body.addView(runtimeLine("Agent", "Hermes prebuilt release " + HermesManager.VERSION));
         body.addView(runtimeLine("Dashboard", "Official Hermes web UI in WebView"));
         body.addView(runtimeLine("Gateway", "Hermes API • 127.0.0.1:8642"));
         body.addView(runtimeLine("Dashboard", "Hermes UI • 127.0.0.1:9119"));
@@ -276,8 +276,11 @@ public final class MainActivity extends Activity {
 
     private void chooseHermesEdition() {
         HermesManager hermes = new HermesManager(this);
-        HermesManager.Layer current = hermes.getSelectedLayer();
         HermesManager.Layer installed = hermes.installedLayer();
+        HermesManager.Layer current =
+            installed != null
+                ? installed
+                : hermes.getSelectedLayer();
 
         HermesManager.Layer[] options = HermesManager.Layer.values();
         String[] labels = {
@@ -286,33 +289,47 @@ public final class MainActivity extends Activity {
             "Full — browser automation and website operation"
         };
 
-        int checked = current.rank;
-        if (installed != null && checked < installed.rank) {
-            checked = installed.rank;
-        }
+        int checked = current == null ? -1 : current.rank;
+        final HermesManager.Layer[] chosen = { current };
 
-        final HermesManager.Layer[] chosen = { options[checked] };
-        new AlertDialog.Builder(this)
+        AlertDialog dialog = new AlertDialog.Builder(this)
             .setTitle("Choose Hermes edition")
             .setMessage(
-                "Select one edition. CARAVEL treats it as one installation choice; any required base components are handled automatically."
+                "Choose exactly one edition. CARAVEL will download only that edition."
             )
-            .setSingleChoiceItems(labels, checked, (dialog, which) -> {
-                if (installed != null && which < installed.rank) return;
+            .setSingleChoiceItems(labels, checked, (d, which) -> {
                 chosen[0] = options[which];
+
+                Button download =
+                    ((AlertDialog)d).getButton(AlertDialog.BUTTON_POSITIVE);
+                if (download != null) {
+                    download.setEnabled(true);
+                }
             })
-            .setPositiveButton("Download", (dialog, which) -> {
+            .setPositiveButton("Download", (d, which) -> {
+                if (chosen[0] == null) {
+                    return;
+                }
+
                 hermes.setSelectedLayer(chosen[0]);
                 hermesButton.setEnabled(false);
                 hermesEdition.setText(
-                    "Selected edition: " + layerName(chosen[0]) + " — starting installation…"
+                    "Selected edition: " + layerName(chosen[0]) +
+                    " — downloading only this edition…"
                 );
+
                 Intent i = new Intent(this, RuntimeService.class)
                     .setAction(RuntimeService.ACTION_INSTALL_HERMES);
                 startService(i);
             })
             .setNegativeButton("Cancel", null)
-            .show();
+            .create();
+
+        dialog.show();
+
+        Button download =
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+        download.setEnabled(chosen[0] != null);
     }
 
     private static String layerName(HermesManager.Layer layer) {
