@@ -8,14 +8,18 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -36,7 +40,6 @@ public final class MainActivity extends Activity {
     private TextView hermesEdition;
     private Button startGatewayButton;
     private Button openDashboardButton;
-
 
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override
@@ -74,7 +77,10 @@ public final class MainActivity extends Activity {
         }
 
         startService(new Intent(this, RuntimeService.class));
-        setContentView(buildDashboard());
+
+        View dashboard = buildDashboard();
+        setContentView(dashboard);
+        applySystemBarInsets(dashboard);
     }
 
     @Override
@@ -97,6 +103,38 @@ public final class MainActivity extends Activity {
     protected void onStop() {
         unregisterReceiver(statusReceiver);
         super.onStop();
+    }
+
+    private void applySystemBarInsets(View root) {
+        final int baseLeft = root.getPaddingLeft();
+        final int baseTop = root.getPaddingTop();
+        final int baseRight = root.getPaddingRight();
+        final int baseBottom = root.getPaddingBottom();
+
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int top = 0;
+            int bottom = 0;
+
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars =
+                    insets.getInsets(WindowInsets.Type.systemBars());
+                top = bars.top;
+                bottom = bars.bottom;
+            } else if (Build.VERSION.SDK_INT >= 23) {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+
+            view.setPadding(
+                baseLeft,
+                baseTop + top,
+                baseRight,
+                baseBottom + bottom
+            );
+            return insets;
+        });
+
+        root.requestApplyInsets();
     }
 
     private void refreshEnvironment() {
@@ -289,23 +327,56 @@ public final class MainActivity extends Activity {
             "Full — browser automation and website operation"
         };
 
-        int checked = current == null ? -1 : current.rank;
         final HermesManager.Layer[] chosen = { current };
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
-            .setTitle("Choose Hermes edition")
-            .setMessage(
-                "Choose exactly one edition. CARAVEL will download only that edition."
-            )
-            .setSingleChoiceItems(labels, checked, (d, which) -> {
-                chosen[0] = options[which];
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(24), dp(8), dp(24), dp(4));
 
-                Button download =
-                    ((AlertDialog)d).getButton(AlertDialog.BUTTON_POSITIVE);
-                if (download != null) {
-                    download.setEnabled(true);
-                }
-            })
+        TextView message = textView(
+            "Choose exactly one edition. CARAVEL will download only the edition you select.",
+            15, text
+        );
+        message.setPadding(0, 0, 0, dp(10));
+        content.addView(message);
+
+        RadioGroup choices = new RadioGroup(this);
+        choices.setOrientation(RadioGroup.VERTICAL);
+
+        int[] radioIds = new int[options.length];
+        for (int i = 0; i < options.length; i++) {
+            RadioButton radio = new RadioButton(this);
+            radio.setId(View.generateViewId());
+            radioIds[i] = radio.getId();
+            radio.setTag(i);
+            radio.setText(labels[i]);
+            radio.setTextSize(15);
+            radio.setTextColor(text);
+            radio.setGravity(Gravity.CENTER_VERTICAL);
+            radio.setMinHeight(dp(52));
+            radio.setPadding(0, dp(4), 0, dp(4));
+            radio.setButtonTintList(
+                new ColorStateList(
+                    new int[][]{
+                        new int[]{android.R.attr.state_checked},
+                        new int[]{-android.R.attr.state_checked}
+                    },
+                    new int[]{accent, muted}
+                )
+            );
+            choices.addView(
+                radio,
+                new RadioGroup.LayoutParams(-1, -2)
+            );
+        }
+
+        if (current != null && current.rank >= 0 && current.rank < radioIds.length) {
+            choices.check(radioIds[current.rank]);
+        }
+
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Choose Hermes edition")
+            .setView(content)
             .setPositiveButton("Download", (d, which) -> {
                 if (chosen[0] == null) {
                     return;
@@ -325,11 +396,31 @@ public final class MainActivity extends Activity {
             .setNegativeButton("Cancel", null)
             .create();
 
-        dialog.show();
+        choices.setOnCheckedChangeListener((group, checkedId) -> {
+            if (checkedId == -1) return;
 
-        Button download =
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-        download.setEnabled(chosen[0] != null);
+            View checkedView = group.findViewById(checkedId);
+            Object tag = checkedView == null ? null : checkedView.getTag();
+            if (tag instanceof Integer) {
+                chosen[0] = options[(Integer) tag];
+
+                Button download =
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                if (download != null) {
+                    download.setEnabled(true);
+                }
+            }
+        });
+
+        dialog.setOnShowListener(d -> {
+            Button download =
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (download != null) {
+                download.setEnabled(chosen[0] != null);
+            }
+        });
+
+        dialog.show();
     }
 
     private static String layerName(HermesManager.Layer layer) {
