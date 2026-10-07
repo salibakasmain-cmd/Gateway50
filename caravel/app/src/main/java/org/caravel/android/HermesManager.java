@@ -35,7 +35,10 @@ public final class HermesManager {
     private static final String ARM64_PREFIX =
         "arm64-v8a-";
 
-    private static final int TARGET_LAYER_RANK = 1; // Standard
+    private static final int DEFAULT_LAYER_RANK = 1; // Standard
+
+    private static final String PREFS_NAME = "caravel_hermes";
+    private static final String PREF_SELECTED_LAYER = "selected_layer";
 
     private static final String LITE_MD5 =
         "ebe6f17c7c6ab81631070479f3e5a393";
@@ -151,15 +154,11 @@ public final class HermesManager {
     }
 
     public boolean isInstalled() {
-        return layerInstalled(Layer.STANDARD)
-            && new File(
-                ubuntu.rootfs(),
-                "usr/local/bin/hermes"
-            ).isFile()
-            && new File(
-                guestAgent,
-                "venv/bin/python3"
-            ).isFile();
+        Layer selected = getSelectedLayer();
+        Layer installed = installedLayer();
+        return installed != null
+            && installed.rank >= selected.rank
+            && new File(ubuntu.rootfs(), "usr/local/bin/hermes").isFile();
     }
 
     public File sourceDir() {
@@ -174,11 +173,36 @@ public final class HermesManager {
         return legacyHome;
     }
 
+    public Layer getSelectedLayer() {
+        String name = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_SELECTED_LAYER, Layer.STANDARD.name());
+        try {
+            return Layer.valueOf(name);
+        } catch (IllegalArgumentException e) {
+            return Layer.STANDARD;
+        }
+    }
+
+    public void setSelectedLayer(Layer layer) {
+        if (layer == null) layer = Layer.STANDARD;
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(PREF_SELECTED_LAYER, layer.name()).apply();
+    }
+
+    public Layer installedLayer() {
+        for (int i = Layer.values().length - 1; i >= 0; i--) {
+            Layer layer = Layer.values()[i];
+            if (layerInstalled(layer)) return layer;
+        }
+        return null;
+    }
+
     public void install(Progress progress) throws IOException {
-        install(Layer.STANDARD, progress);
+        install(getSelectedLayer(), progress);
     }
 
     public void installFull(Progress progress) throws IOException {
+        setSelectedLayer(Layer.FULL);
         install(Layer.FULL, progress);
     }
 
@@ -206,9 +230,10 @@ public final class HermesManager {
             target = Layer.STANDARD;
         }
 
+        setSelectedLayer(target);
         if (progress != null) {
             progress.onProgress(
-                "Preparing prebuilt Hermes " + targetName(target),
+                "Installing Hermes " + targetName(target) + " edition",
                 0
             );
         }
