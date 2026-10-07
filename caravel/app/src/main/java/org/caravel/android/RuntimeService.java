@@ -68,9 +68,9 @@ public final class RuntimeService extends Service {
         }
 
         /*
-         * CARAVEL is self-bootstrapping: on first launch it installs the
-         * Ubuntu base and then the prebuilt Hermes Standard runtime.
-         * Existing installations simply start their processes.
+         * CARAVEL is self-bootstrapping: on first launch it installs Ubuntu,
+         * then waits for the user to choose exactly one Hermes edition.
+         * Existing selected installations simply start their processes.
          */
         if (!ubuntuManager.isInstalled()) {
             installUbuntu();
@@ -154,6 +154,12 @@ public final class RuntimeService extends Service {
 
                 HermesManager.Layer selected =
                     hermesManager.getSelectedLayer();
+
+                if (selected == null) {
+                    throw new IllegalStateException(
+                        "Choose a Hermes edition before installing"
+                    );
+                }
 
                 sendStatus(
                     "Installing Hermes " + selectedName(selected) + " edition",
