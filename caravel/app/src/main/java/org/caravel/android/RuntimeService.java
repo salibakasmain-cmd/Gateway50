@@ -67,17 +67,17 @@ public final class RuntimeService extends Service {
             startForeground(1001, ready);
         }
 
-        if (hermesManager.isInstalled()) {
-            startDashboard();
-
-            if (providerConfigured()) {
-                startGateway();
-            } else {
-                sendStatus(
-                    "Hermes installed — dashboard ready; configure a model/provider",
-                    100
-                );
-            }
+        /*
+         * CARAVEL is self-bootstrapping: on first launch it installs the
+         * Ubuntu base and then the prebuilt Hermes Standard runtime.
+         * Existing installations simply start their processes.
+         */
+        if (!ubuntuManager.isInstalled()) {
+            installUbuntu();
+        } else if (!hermesManager.isInstalled()) {
+            installHermes();
+        } else {
+            ensureRuntimeProcesses();
         }
     }
 
@@ -125,7 +125,8 @@ public final class RuntimeService extends Service {
             try {
                 sendStatus("Starting Ubuntu Base installation", 0);
                 ubuntuManager.install(this::sendStatus);
-                sendStatus("Ubuntu ready — Hermes can now be installed", 100);
+                sendStatus("Ubuntu ready — installing Hermes runtime", 100);
+                installHermes();
             } catch (Exception e) {
                 sendStatus("Ubuntu installation failed: " + safe(e), -1);
             } finally {
@@ -146,7 +147,10 @@ public final class RuntimeService extends Service {
                     throw new IllegalStateException("Ubuntu must be installed first");
                 }
 
-                sendStatus("Starting Hermes Agent setup", 0);
+                sendStatus(
+                    "Downloading prebuilt Hermes Standard runtime",
+                    0
+                );
                 hermesManager.install(this::sendStatus);
 
                 if (providerConfigured()) {
