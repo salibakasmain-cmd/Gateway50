@@ -229,7 +229,23 @@ public final class HermesManager {
 
         prepareWebAssets(progress);
         ensureRuntimeFiles();
-        validateGuestRuntime(progress);
+
+        try {
+            validateGuestRuntime(progress);
+        } catch (IOException e) {
+            /*
+             * Do not leave a successful-looking layer marker behind when the
+             * guest runtime itself fails validation.
+             */
+            File marker = new File(
+                ubuntu.rootfs(),
+                target.marker
+            );
+            if (marker.exists()) {
+                marker.delete();
+            }
+            throw e;
+        }
 
         /*
          * Remove the old source-install leftovers from earlier CARAVEL
