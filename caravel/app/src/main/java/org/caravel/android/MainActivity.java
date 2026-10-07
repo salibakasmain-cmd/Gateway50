@@ -2,6 +2,7 @@ package org.caravel.android;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -32,6 +33,7 @@ public final class MainActivity extends Activity {
     private TextView runtimeState;
     private Button ubuntuButton;
     private Button hermesButton;
+    private TextView hermesEdition;
     private Button startGatewayButton;
     private Button openDashboardButton;
 
@@ -113,13 +115,25 @@ public final class MainActivity extends Activity {
             ubuntuButton.setEnabled(true);
             hermesState.setText("Hermes waits for Ubuntu");
             hermesButton.setEnabled(false);
+            if (hermesEdition != null) {
+                hermesEdition.setText("Select an edition after Ubuntu is ready.");
+            }
         }
 
         if (hermesInstalled) {
+            HermesManager.Layer installed = hermes.installedLayer();
             hermesState.setText(
-                "Hermes Agent " + HermesManager.VERSION + " installed"
+                "Hermes " + layerName(installed) + " edition " +
+                HermesManager.VERSION + " installed"
             );
+            hermesButton.setText("HERMES EDITION INSTALLED");
             hermesButton.setEnabled(false);
+            if (hermesEdition != null) {
+                hermesEdition.setText(
+                    "Installed edition: " + layerName(installed) +
+                    ". Higher editions can be selected later."
+                );
+            }
         }
 
         if (startGatewayButton != null) {
@@ -193,17 +207,18 @@ public final class MainActivity extends Activity {
         hermesState.setPadding(dp(14), dp(14), dp(14), dp(14));
         body.addView(hermesState);
 
+        hermesEdition = textView(
+            "Choose Lite, Standard, or Full. Select one edition; CARAVEL handles any required base components internally.",
+            14, muted
+        );
+        hermesEdition.setPadding(dp(0), dp(0), dp(0), dp(8));
+        body.addView(hermesEdition);
+
         hermesButton = new Button(this);
-        hermesButton.setText("INSTALL HERMES AGENT");
+        hermesButton.setText("CHOOSE HERMES EDITION");
         hermesButton.setTextColor(bg);
         hermesButton.setBackgroundColor(accent);
-        hermesButton.setOnClickListener(v -> {
-            hermesButton.setEnabled(false);
-
-            Intent i = new Intent(this, RuntimeService.class)
-                .setAction(RuntimeService.ACTION_INSTALL_HERMES);
-            startService(i);
-        });
+        hermesButton.setOnClickListener(v -> chooseHermesEdition());
         body.addView(hermesButton, margins(0, dp(10), 0, 0));
 
         body.addView(section("STEP 3 • DASHBOARD"));
@@ -257,6 +272,54 @@ public final class MainActivity extends Activity {
         root.addView(footer, new LinearLayout.LayoutParams(-1, dp(34)));
 
         return root;
+    }
+
+    private void chooseHermesEdition() {
+        HermesManager hermes = new HermesManager(this);
+        HermesManager.Layer current = hermes.getSelectedLayer();
+        HermesManager.Layer installed = hermes.installedLayer();
+
+        HermesManager.Layer[] options = HermesManager.Layer.values();
+        String[] labels = {
+            "Lite — basic chat, agent teams, files, command-line work",
+            "Standard — recommended for most phones; more tools and integrations",
+            "Full — browser automation and website operation"
+        };
+
+        int checked = current.rank;
+        if (installed != null && checked < installed.rank) {
+            checked = installed.rank;
+        }
+
+        final HermesManager.Layer[] chosen = { options[checked] };
+        new AlertDialog.Builder(this)
+            .setTitle("Choose Hermes edition")
+            .setMessage(
+                "Select one edition. CARAVEL treats it as one installation choice; any required base components are handled automatically."
+            )
+            .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                if (installed != null && which < installed.rank) return;
+                chosen[0] = options[which];
+            })
+            .setPositiveButton("Download", (dialog, which) -> {
+                hermes.setSelectedLayer(chosen[0]);
+                hermesButton.setEnabled(false);
+                hermesEdition.setText(
+                    "Selected edition: " + layerName(chosen[0]) + " — starting installation…"
+                );
+                Intent i = new Intent(this, RuntimeService.class)
+                    .setAction(RuntimeService.ACTION_INSTALL_HERMES);
+                startService(i);
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private static String layerName(HermesManager.Layer layer) {
+        if (layer == null) return "None";
+        String name = layer.name();
+        return name.substring(0, 1) +
+            name.substring(1).toLowerCase(java.util.Locale.US);
     }
 
     private View header() {

@@ -75,7 +75,10 @@ public final class RuntimeService extends Service {
         if (!ubuntuManager.isInstalled()) {
             installUbuntu();
         } else if (!hermesManager.isInstalled()) {
-            installHermes();
+            sendStatus(
+                "Ubuntu ready — choose a Hermes edition to install",
+                0
+            );
         } else {
             ensureRuntimeProcesses();
         }
@@ -125,8 +128,10 @@ public final class RuntimeService extends Service {
             try {
                 sendStatus("Starting Ubuntu Base installation", 0);
                 ubuntuManager.install(this::sendStatus);
-                sendStatus("Ubuntu ready — installing Hermes runtime", 100);
-                installHermes();
+                sendStatus(
+                    "Ubuntu ready — choose a Hermes edition to install",
+                    100
+                );
             } catch (Exception e) {
                 sendStatus("Ubuntu installation failed: " + safe(e), -1);
             } finally {
@@ -147,8 +152,11 @@ public final class RuntimeService extends Service {
                     throw new IllegalStateException("Ubuntu must be installed first");
                 }
 
+                HermesManager.Layer selected =
+                    hermesManager.getSelectedLayer();
+
                 sendStatus(
-                    "Downloading prebuilt Hermes Standard runtime",
+                    "Installing Hermes " + selectedName(selected) + " edition",
                     0
                 );
                 hermesManager.install(this::sendStatus);
@@ -447,6 +455,12 @@ public final class RuntimeService extends Service {
             }
         } catch (Exception ignored) {
         }
+    }
+
+    private static String selectedName(HermesManager.Layer layer) {
+        String name = layer == null ? "Standard" : layer.name();
+        return name.substring(0, 1) +
+            name.substring(1).toLowerCase(java.util.Locale.US);
     }
 
     private void sendStatus(String message, int percent) {
