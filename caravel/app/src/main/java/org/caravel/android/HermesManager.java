@@ -35,10 +35,8 @@ public final class HermesManager {
     private static final String ARM64_PREFIX =
         "arm64-v8a-";
 
-    private static final int DEFAULT_LAYER_RANK = 1; // Standard
-
     private static final String PREFS_NAME = "caravel_hermes";
-    private static final String PREF_SELECTED_LAYER = "selected_layer";
+    private static final String PREF_SELECTED_LAYER = "selected_layer_v2";
 
     private static final String LITE_MD5 =
         "ebe6f17c7c6ab81631070479f3e5a393";
@@ -155,10 +153,12 @@ public final class HermesManager {
 
     public boolean isInstalled() {
         Layer selected = getSelectedLayer();
-        Layer installed = installedLayer();
-        return installed != null
-            && installed.rank >= selected.rank
-            && new File(ubuntu.rootfs(), "usr/local/bin/hermes").isFile();
+        return selected != null
+            && layerInstalled(selected)
+            && new File(
+                ubuntu.rootfs(),
+                "usr/local/bin/hermes"
+            ).isFile();
     }
 
     public File sourceDir() {
@@ -174,19 +174,35 @@ public final class HermesManager {
     }
 
     public Layer getSelectedLayer() {
-        String name = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(PREF_SELECTED_LAYER, Layer.STANDARD.name());
+        String name = context.getSharedPreferences(
+            PREFS_NAME,
+            Context.MODE_PRIVATE
+        ).getString(PREF_SELECTED_LAYER, null);
+
+        if (name == null) {
+            return null;
+        }
+
         try {
             return Layer.valueOf(name);
         } catch (IllegalArgumentException e) {
-            return Layer.STANDARD;
+            return null;
         }
     }
 
     public void setSelectedLayer(Layer layer) {
-        if (layer == null) layer = Layer.STANDARD;
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit().putString(PREF_SELECTED_LAYER, layer.name()).apply();
+        if (layer == null) {
+            context.getSharedPreferences(
+                PREFS_NAME,
+                Context.MODE_PRIVATE
+            ).edit().remove(PREF_SELECTED_LAYER).apply();
+            return;
+        }
+
+        context.getSharedPreferences(
+            PREFS_NAME,
+            Context.MODE_PRIVATE
+        ).edit().putString(PREF_SELECTED_LAYER, layer.name()).apply();
     }
 
     public Layer installedLayer() {
@@ -227,7 +243,13 @@ public final class HermesManager {
         }
 
         if (target == null) {
-            target = Layer.STANDARD;
+            target = getSelectedLayer();
+        }
+
+        if (target == null) {
+            throw new IOException(
+                "Select a Hermes edition before installation"
+            );
         }
 
         setSelectedLayer(target);
@@ -239,18 +261,12 @@ public final class HermesManager {
         }
 
         /*
-         * Install missing dependencies in rank order:
-         * Ubuntu -> Lite -> Standard -> Full.
+         * The selected edition is the user-visible installation choice and
+         * the only Hermes archive CARAVEL downloads for that installation.
+         * Ubuntu is the already-installed base environment; CARAVEL does not
+         * silently walk Lite -> Standard -> Full.
          */
-        for (Layer layer : Layer.values()) {
-            if (layer.rank > target.rank) {
-                break;
-            }
-
-            if (!layerInstalled(layer)) {
-                installLayer(layer, target, progress);
-            }
-        }
+        installLayer(target, progress);
 
         prepareWebAssets(progress);
         ensureRuntimeFiles();
@@ -296,7 +312,6 @@ public final class HermesManager {
 
     private void installLayer(
         Layer layer,
-        Layer target,
         Progress progress
     ) throws IOException {
         File archives = new File(root, "layers");
@@ -313,12 +328,7 @@ public final class HermesManager {
             layer.artifact
         );
 
-        int basePercent =
-            layer.rank == 0
-                ? 5
-                : layer.rank == 1
-                    ? 40
-                    : 72;
+        int basePercent = 5;
 
         if (progress != null) {
             progress.onProgress(
@@ -349,12 +359,8 @@ public final class HermesManager {
                 new File(archive.getPath() + ".part"),
                 layer.url,
                 layer.md5,
-                basePercent,
-                Math.min(
-                    30,
-                    layer.rank == 0 ? 32 :
-                    layer.rank == 1 ? 30 : 22
-                ),
+                8,
+                67,
                 progress
             );
         }
@@ -425,13 +431,9 @@ public final class HermesManager {
         partial.delete();
 
         if (progress != null) {
-            int done =
-                layer.rank == 0 ? 37 :
-                layer.rank == 1 ? 69 : 94;
-
             progress.onProgress(
                 "Hermes " + targetName(layer) + " installed",
-                done
+                99
             );
         }
     }
