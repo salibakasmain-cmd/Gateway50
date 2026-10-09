@@ -1,4 +1,4 @@
-package org.caravel.android;
+package org.caravel.bubblie;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -19,20 +19,22 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class RuntimeService extends Service {
+    public static final String ACTION_INSTALL_SELECTED =
+        "org.caravel.bubblie.action.INSTALL_SELECTED";
     public static final String ACTION_INSTALL_UBUNTU =
-        "org.caravel.android.action.INSTALL_UBUNTU";
+        "org.caravel.bubblie.action.INSTALL_UBUNTU";
     public static final String ACTION_INSTALL_HERMES =
-        "org.caravel.android.action.INSTALL_HERMES";
+        "org.caravel.bubblie.action.INSTALL_HERMES";
     public static final String ACTION_START_BACKEND =
-        "org.caravel.android.action.START_BACKEND";
+        "org.caravel.bubblie.action.START_BACKEND";
     public static final String ACTION_RESTART_GATEWAY =
-        "org.caravel.android.action.RESTART_GATEWAY";
+        "org.caravel.bubblie.action.RESTART_GATEWAY";
     public static final String ACTION_STATUS =
-        "org.caravel.android.action.STATUS";
+        "org.caravel.bubblie.action.STATUS";
     public static final String EXTRA_MESSAGE = "message";
     public static final String EXTRA_PERCENT = "percent";
 
-    private static final String CHANNEL = "caravel_runtime";
+    private static final String CHANNEL = "bubblie_runtime";
 
     private ExecutorService executor;
     private UbuntuManager ubuntuManager;
@@ -45,6 +47,7 @@ public final class RuntimeService extends Service {
     private Thread gatewayLogThread;
     private Thread dashboardLogThread;
 
+    private final AtomicBoolean installationRunning = new AtomicBoolean(false);
     private final AtomicBoolean ubuntuInstalling = new AtomicBoolean(false);
     private final AtomicBoolean hermesInstalling = new AtomicBoolean(false);
     private final AtomicBoolean gatewayStarting = new AtomicBoolean(false);
@@ -59,7 +62,7 @@ public final class RuntimeService extends Service {
         hermesManager = new HermesManager(this);
         executor = Executors.newFixedThreadPool(3);
 
-        Notification ready = notification("CARAVEL runtime ready");
+        Notification ready = notification("Bubblie runtime ready");
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(
                 1001,
@@ -70,20 +73,12 @@ public final class RuntimeService extends Service {
             startForeground(1001, ready);
         }
 
-        /*
-         * CARAVEL is self-bootstrapping: on first launch it installs Ubuntu,
-         * then waits for the user to choose exactly one Hermes edition.
-         * Existing selected installations simply start their processes.
-         */
-        if (!ubuntuManager.isInstalled()) {
-            installUbuntu();
-        } else if (!hermesManager.isInstalled()) {
-            sendStatus(
-                "Ubuntu ready — choose a Hermes edition to install",
-                0
-            );
-        } else {
+        // First launch is inspection-only. Large downloads require an explicit
+        // edition choice and confirmation from MainActivity.
+        if (hermesManager.isInstalled()) {
             ensureRuntimeProcesses();
+        } else {
+            sendStatus("Choose a Hermes edition when you are ready to install", 0);
         }
     }
 
@@ -92,7 +87,9 @@ public final class RuntimeService extends Service {
         if (intent != null) {
             String action = intent.getAction();
 
-            if (ACTION_INSTALL_UBUNTU.equals(action)) {
+            if (ACTION_INSTALL_SELECTED.equals(action)) {
+                installSelectedEdition();
+            } else if (ACTION_INSTALL_UBUNTU.equals(action)) {
                 installUbuntu();
             } else if (ACTION_INSTALL_HERMES.equals(action)) {
                 installHermes();
@@ -121,6 +118,44 @@ public final class RuntimeService extends Service {
         if (providerConfigured()) {
             startGateway();
         }
+    }
+
+    private void installSelectedEdition() {
+        if (!installationRunning.compareAndSet(false, true)) {
+            sendStatus("Installation is already running", 0);
+            return;
+        }
+        executor.submit(() -> {
+            try {
+                HermesManager.Layer selected = hermesManager.getSelectedLayer();
+                if (selected == null) throw new IllegalStateException("Choose an edition first");
+                if (!ubuntuManager.isInstalled()) {
+                    sendStatus("Downloading the required Ubuntu environment", 0);
+                    ubuntuManager.install((message, percent) -> {
+                        int combined = percent < 0 ? -1 : percent * 35 / 100;
+                        sendStatus(message, combined);
+                    });
+                } else {
+                    sendStatus("Existing verified Ubuntu environment will be reused", 35);
+                }
+                sendStatus("Installing Hermes " + selectedName(selected), 36);
+                hermesManager.install((message, percent) -> {
+                    int combined = percent < 0 ? -1 : 36 + (percent * 64 / 100);
+                    sendStatus(message, combined);
+                });
+                if (!hermesManager.isInstalled()) {
+                    throw new IllegalStateException("Hermes validation did not complete");
+                }
+                sendStatus("Installation verified — Bubblie is ready", 100);
+                ensureRuntimeProcesses();
+            } catch (Exception error) {
+                sendStatus("Installation failed: " + safe(error), -1);
+            } finally {
+                installationRunning.set(false);
+                getSharedPreferences("bubblie_installer", MODE_PRIVATE).edit()
+                    .putBoolean("running", false).apply();
+            }
+        });
     }
 
     private void installUbuntu() {
@@ -250,7 +285,7 @@ public final class RuntimeService extends Service {
 
         java.io.File home = new java.io.File(
             getFilesDir(),
-            "caravel/hermes/home"
+            "bubblie/hermes/home"
         );
 
         java.io.File config =
@@ -499,6 +534,12 @@ public final class RuntimeService extends Service {
     }
 
     private void sendStatus(String message, int percent) {
+        getSharedPreferences("bubblie_installer", MODE_PRIVATE).edit()
+            .putString("message", message)
+            .putInt("percent", percent)
+            .putBoolean("running", installationRunning.get() || ubuntuInstalling.get() || hermesInstalling.get())
+            .putLong("updated_at", System.currentTimeMillis())
+            .apply();
         Intent out = new Intent(ACTION_STATUS)
             .setPackage(getPackageName())
             .putExtra(EXTRA_MESSAGE, message)
@@ -525,10 +566,8 @@ public final class RuntimeService extends Service {
         );
 
         return new Notification.Builder(this, CHANNEL)
-            .setSmallIcon(
-                android.R.drawable.stat_sys_download_done
-            )
-            .setContentTitle("CARAVEL runtime")
+            .setSmallIcon(R.drawable.ic_stat_bubblie)
+            .setContentTitle("Bubblie runtime")
             .setContentText(message)
             .setContentIntent(pending)
             .setOngoing(true)
@@ -550,7 +589,7 @@ public final class RuntimeService extends Service {
             manager.createNotificationChannel(
                 new NotificationChannel(
                     CHANNEL,
-                    "CARAVEL runtime",
+                    "Bubblie runtime",
                     NotificationManager.IMPORTANCE_LOW
                 )
             );
@@ -559,6 +598,16 @@ public final class RuntimeService extends Service {
 
     @Override
     public void onDestroy() {
+        if (installationRunning.get() || ubuntuInstalling.get() || hermesInstalling.get()) {
+            getSharedPreferences("bubblie_installer", MODE_PRIVATE).edit()
+                .putBoolean("running", false)
+                .putInt("percent", -1)
+                .putString("message", "Installation stopped before completion; retry is safe")
+                .apply();
+        }
+        installationRunning.set(false);
+        ubuntuInstalling.set(false);
+        hermesInstalling.set(false);
         Process dashboard = dashboardProcess;
         dashboardProcess = null;
 

@@ -1,4 +1,4 @@
-package org.caravel.android;
+package org.caravel.bubblie;
 
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -18,8 +18,8 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 public final class ProviderStore {
-    private static final String PREFS = "caravel_provider";
-    private static final String KEY_NAME = "caravel_provider_aes_v1";
+    private static final String PREFS = "bubblie_provider";
+    private static final String KEY_NAME = "bubblie_provider_aes_v1";
     private static final String FIELD_PROVIDER = "provider";
     private static final String FIELD_MODEL = "model";
     private static final String FIELD_BASE_URL = "base_url";
@@ -84,7 +84,7 @@ public final class ProviderStore {
         String apiMode = prefs.getString(FIELD_API_MODE, "chat_completions");
         String apiKey = decryptKey();
 
-        File home = new File(context.getFilesDir(), "caravel/hermes/home");
+        File home = new File(context.getFilesDir(), "bubblie/hermes/home");
         if (!home.isDirectory() && !home.mkdirs()) {
             throw new IllegalStateException("Unable to create Hermes home");
         }
@@ -94,14 +94,14 @@ public final class ProviderStore {
             "  provider: " + yamlQuote(provider) + "\n" +
             "  default: " + yamlQuote(model) + "\n" +
             "  base_url: " + yamlQuote(baseUrl) + "\n" +
-            "  api_key: \"${CARAVEL_PROVIDER_API_KEY}\"\n" +
+            "  api_key: \"${BUBBLIE_PROVIDER_API_KEY}\"\n" +
             "  api_mode: " + yamlQuote(apiMode) + "\n");
 
         File env = new File(home, ".env");
         String existing = env.isFile()
             ? new String(java.nio.file.Files.readAllBytes(env.toPath()), StandardCharsets.UTF_8)
             : "";
-        writeFile(env, upsert(existing, "CARAVEL_PROVIDER_API_KEY", apiKey));
+        writeFile(env, upsert(existing, "BUBBLIE_PROVIDER_API_KEY", apiKey));
     }
 
     public synchronized String model() {
@@ -136,11 +136,43 @@ public final class ProviderStore {
         }
     }
 
+    /** Restores only non-secret fields from Bubblie's own generated YAML. */
+    public synchronized void restoreNonSecretConfiguration(String yaml) {
+        String provider = yamlValue(yaml, "provider");
+        String model = yamlValue(yaml, "default");
+        String baseUrl = yamlValue(yaml, "base_url");
+        String apiMode = normalizeApiMode(yamlValue(yaml, "api_mode"));
+        if (provider.isEmpty() || model.isEmpty() || baseUrl.isEmpty()) {
+            throw new IllegalArgumentException("Backup configuration is missing required provider fields");
+        }
+        prefs.edit()
+            .putString(FIELD_PROVIDER, provider)
+            .putString(FIELD_MODEL, model)
+            .putString(FIELD_BASE_URL, normalizeBaseUrl(baseUrl))
+            .putString(FIELD_API_MODE, apiMode)
+            .remove(FIELD_KEY_CIPHER)
+            .remove(FIELD_KEY_IV)
+            .apply();
+        File env = new File(context.getFilesDir(), "bubblie/hermes/home/.env");
+        if (env.isFile()) {
+            try {
+                String content = new String(java.nio.file.Files.readAllBytes(env.toPath()), StandardCharsets.UTF_8);
+                StringBuilder safe = new StringBuilder();
+                for (String line : content.replace("\r", "").split("\n")) {
+                    if (!line.startsWith("BUBBLIE_PROVIDER_API_KEY=")) safe.append(line).append('\n');
+                }
+                writeFile(env, safe.toString());
+            } catch (Exception error) {
+                throw new IllegalStateException("Unable to clear the previous provider secret", error);
+            }
+        }
+    }
+
     public synchronized void clear() {
         prefs.edit().clear().apply();
         File home = new File(
             context.getFilesDir(),
-            "caravel/hermes/home"
+            "bubblie/hermes/home"
         );
 
         File config = new File(home, "config.yaml");
@@ -191,6 +223,20 @@ public final class ProviderStore {
             .setRandomizedEncryptionRequired(true)
             .build());
         return generator.generateKey();
+    }
+
+    private static String yamlValue(String yaml, String key) {
+        for (String line : yaml.replace("\r", "").split("\n")) {
+            String trimmed = line.trim();
+            if (!trimmed.startsWith(key + ":")) continue;
+            String value = trimmed.substring(key.length() + 1).trim();
+            if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+                value = value.substring(1, value.length() - 1)
+                    .replace("\\\"", "\"").replace("\\\\", "\\");
+            }
+            return value;
+        }
+        return "";
     }
 
     private static String normalizeApiMode(String value) {

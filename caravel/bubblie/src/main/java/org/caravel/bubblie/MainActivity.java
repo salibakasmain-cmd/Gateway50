@@ -1,4 +1,4 @@
-package org.caravel.android;
+package org.caravel.bubblie;
 
 import android.Manifest;
 import android.app.AlertDialog;
@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -24,6 +25,7 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -44,8 +46,10 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Agent-first native CARAVEL shell. Runtime ownership remains in RuntimeService. */
+/** Agent-first native Bubblie shell. Runtime ownership remains in RuntimeService. */
 public final class MainActivity extends android.app.Activity {
+    private static final int REQUEST_BACKUP = 401;
+    private static final int REQUEST_RESTORE = 402;
     private static final int BG = Color.rgb(6, 15, 24);
     private static final int PANEL = Color.rgb(11, 27, 40);
     private static final int PANEL_2 = Color.rgb(14, 35, 50);
@@ -64,18 +68,23 @@ public final class MainActivity extends android.app.Activity {
 
     private LinearLayout root;
     private FrameLayout content;
+    private View navigationShell;
     private TextView headerState;
     private String destination = "Agent";
+    private String agentDraft = "";
     private boolean gatewayReady;
     private boolean receiverRegistered;
     private EditText composer;
     private LinearLayout conversation;
     private LinearLayout timeline;
     private ScrollView agentScroll;
-    private Process terminalProcess;
-    private PrintWriter terminalInput;
+    private TerminalSession terminalSession;
     private TextView terminalOutput;
+    private ScrollView terminalScroll;
+    private final List<String> terminalHistory = new ArrayList<>();
+    private int terminalHistoryIndex;
     private File workspaceDirectory;
+    private BackupManager backupManager;
 
     private UbuntuManager ubuntu;
     private HermesManager hermes;
@@ -101,7 +110,9 @@ public final class MainActivity extends android.app.Activity {
         hermes = new HermesManager(this);
         provider = ProviderStore.getInstance(this);
         gateway = new GatewayClient(this);
-        workspaceDirectory = new File(getFilesDir(), "caravel/workspace");
+        backupManager = new BackupManager(this);
+        terminalSession = TerminalSession.get(this);
+        workspaceDirectory = new File(getFilesDir(), "bubblie/workspace");
         workspaceDirectory.mkdirs();
 
         Window window = getWindow();
@@ -113,8 +124,8 @@ public final class MainActivity extends android.app.Activity {
         applyInsets();
         requestNotifications();
         registerStatusReceiver();
-        startForegroundService(new Intent(this, RuntimeService.class));
-        addActivity("App", "CARAVEL opened", "completed");
+        if (hermes.isInstalled()) serviceAction(null);
+        addActivity("App", "Bubblie opened", "completed");
         showAgent();
         probeGateway();
     }
@@ -128,31 +139,34 @@ public final class MainActivity extends android.app.Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView mark = text("◢", 34, TEAL, true);
         header.addView(mark, lp(48, 52));
-        TextView title = text("CARAVEL", 24, TEXT, true);
+        TextView title = text("Bubblie", 24, TEXT, true);
         title.setLetterSpacing(.12f);
         header.addView(title, weight(1));
         headerState = text("●  Checking", 14, MUTED, false);
         header.addView(headerState);
         TextView menu = text("⋮", 28, MUTED, false);
         menu.setGravity(Gravity.CENTER);
-        menu.setOnClickListener(v -> showSettings());
+        menu.setContentDescription("More options");
+        menu.setOnClickListener(this::showOverflowMenu);
         header.addView(menu, lp(44, 48));
         root.addView(header, matchWrap());
 
         content = new FrameLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
-        root.addView(buildNavigation(), new LinearLayout.LayoutParams(-1, dp(72)));
+        navigationShell = buildNavigation();
+        root.addView(navigationShell, margins(-1, 74, 12, 6, 12, 10));
         setContentView(root);
     }
 
     private View buildNavigation() {
-        LinearLayout bar = horizontal(4, 5, 4, 3);
+        LinearLayout bar = horizontal(8, 6, 8, 6);
         bar.setGravity(Gravity.CENTER);
-        bar.setBackgroundColor(Color.rgb(5, 13, 21));
+        bar.setElevation(dp(10));
+        bar.setBackground(round(PANEL, 24, BORDER));
         addNav(bar, "◢", "Agent");
         addNav(bar, "□", "Workspace");
         addNav(bar, ">_", "Terminal");
-        addNav(bar, "◇", "Tools");
+        addNav(bar, "◇", "Dashboard");
         addNav(bar, "⚙", "Settings");
         return bar;
     }
@@ -167,20 +181,23 @@ public final class MainActivity extends android.app.Activity {
     }
 
     private void navigate(String name) {
+        if (composer != null) agentDraft = composer.getText().toString();
         destination = name;
         for (TextView nav : navViews) {
             boolean active = name.equals(nav.getTag());
-            nav.setTextColor(active ? ("Agent".equals(name) ? TEAL : BLUE) : MUTED);
+            nav.setTextColor(active ? TEAL : MUTED);
             nav.setTypeface(Typeface.DEFAULT, active ? Typeface.BOLD : Typeface.NORMAL);
+            nav.setBackground(active ? round(Color.rgb(12, 53, 57), 16, 0) : null);
         }
         if ("Agent".equals(name)) showAgent();
         else if ("Workspace".equals(name)) showWorkspace(workspaceDirectory);
         else if ("Terminal".equals(name)) showTerminal();
-        else if ("Tools".equals(name)) showTools();
+        else if ("Dashboard".equals(name)) showDashboard();
         else showSettings();
     }
 
     private void showAgent() {
+        if (composer != null && composer.isAttachedToWindow()) agentDraft = composer.getText().toString();
         destination = "Agent";
         selectNav("Agent");
         content.removeAllViews();
@@ -218,13 +235,28 @@ public final class MainActivity extends android.app.Activity {
 
         LinearLayout states = horizontal(5, 12, 5, 12);
         states.addView(statusCell("Model", provider.isConfigured() ? provider.model() : "Not configured", provider.isConfigured()), weight(1));
-        states.addView(statusCell("Linux", ubuntu.isInstalled() ? "Ready" : "Installing", ubuntu.isInstalled()), weight(1));
+        states.addView(statusCell("Linux", ubuntu.isInstalled() ? "Ready" : "Not installed", ubuntu.isInstalled()), weight(1));
         states.addView(statusCell("Agent", gatewayReady ? "Ready" : hermes.isInstalled() ? "Offline" : "Not installed", gatewayReady), weight(1));
         card.addView(states);
-        if (!hermes.isInstalled() && ubuntu.isInstalled()) {
-            Button install = actionButton("Choose Hermes edition", TEAL);
-            install.setOnClickListener(v -> chooseEdition());
-            card.addView(install, margins(-1, 48, 12, 5, 12, 14));
+        if (!hermes.isInstalled()) {
+            HermesManager.Layer selected = hermes.getSelectedLayer();
+            if (selected != null) {
+                TextView choice = text("Selected: " + editionLabel(selected) + " · " +
+                    formatBytes(selected.downloadBytes) + " verified release archive", 12, MUTED, false);
+                card.addView(choice, margins(-1, -2, 14, 5, 14, 5));
+                Button install = actionButton("Install " + editionLabel(selected), TEAL);
+                install.setOnClickListener(v -> confirmInstall(selected));
+                card.addView(install, margins(-1, 48, 12, 5, 12, 4));
+                Button change = actionButton("Change edition", PANEL_2);
+                change.setOnClickListener(v -> chooseEdition());
+                card.addView(change, margins(-1, 44, 12, 4, 12, 10));
+            } else {
+                Button choose = actionButton("Choose Hermes edition", TEAL);
+                choose.setOnClickListener(v -> chooseEdition());
+                card.addView(choose, margins(-1, 48, 12, 5, 12, 14));
+            }
+            View progress = buildInstallerState();
+            if (progress != null) card.addView(progress, margins(-1, -2, 12, 5, 12, 14));
         } else if (!provider.isConfigured() && hermes.isInstalled()) {
             Button configure = actionButton("Configure provider", BLUE);
             configure.setOnClickListener(v -> navigate("Settings"));
@@ -237,16 +269,53 @@ public final class MainActivity extends android.app.Activity {
         return card;
     }
 
+    private View buildInstallerState() {
+        android.content.SharedPreferences state = getSharedPreferences("bubblie_installer", MODE_PRIVATE);
+        String message = state.getString("message", "");
+        int percent = state.getInt("percent", 0);
+        boolean running = state.getBoolean("running", false);
+        if (message.isEmpty() || (!running && percent >= 0)) return null;
+        LinearLayout row = horizontal(10, 10, 10, 10);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        ProgressBar spinner = new ProgressBar(this, null,
+            percent > 0 ? android.R.attr.progressBarStyle : android.R.attr.progressBarStyleSmall);
+        spinner.setIndeterminate(percent <= 0);
+        if (percent > 0) { spinner.setMax(100); spinner.setProgress(Math.min(100, percent)); }
+        row.addView(spinner, lp(42, 42));
+        LinearLayout copy = vertical(10, 0, 0, 0);
+        copy.addView(text(percent > 0 ? percent + "%" : running ? "Working…" : "Needs attention",
+            14, percent < 0 ? RED : TEAL, true));
+        copy.addView(text(message, 12, MUTED, false));
+        row.addView(copy, weight(1));
+        return row;
+    }
+
+    private void confirmInstall(HermesManager.Layer selected) {
+        long free = getFilesDir().getUsableSpace();
+        String details = editionLabel(selected) + " archive: " + formatBytes(selected.downloadBytes) +
+            ". Ubuntu is installed first when required. Available app-storage volume: " + formatBytes(free) + ".";
+        new AlertDialog.Builder(this).setTitle("Install selected edition?")
+            .setMessage(details).setNegativeButton("Not now", null)
+            .setPositiveButton("Install", (dialog, which) -> {
+                serviceAction(RuntimeService.ACTION_INSTALL_SELECTED);
+                addActivity("Installer", "Confirmed " + editionLabel(selected) + " installation", "running");
+                showAgent();
+            }).show();
+    }
+
+    private static String editionLabel(HermesManager.Layer layer) {
+        String lower = layer.name().toLowerCase(java.util.Locale.US);
+        return Character.toUpperCase(lower.charAt(0)) + lower.substring(1);
+    }
+
     private String setupTitle() {
-        if (!ubuntu.isInstalled()) return "Preparing Linux environment";
         if (!hermes.isInstalled()) return "Choose an agent edition";
         if (!provider.isConfigured()) return "Connect a model provider";
         return "Agent runtime offline";
     }
 
     private String setupDescription() {
-        if (!ubuntu.isInstalled()) return "Ubuntu ARM64 is being safely installed. Progress appears below.";
-        if (!hermes.isInstalled()) return "Install Lite, Standard, or Full to continue.";
+        if (!hermes.isInstalled()) return "Select Lite, Standard, or Full. Nothing downloads until you confirm installation.";
         if (!provider.isConfigured()) return "Your API key is encrypted with Android Keystore.";
         return "Start Hermes Gateway, then send your first task.";
     }
@@ -289,12 +358,14 @@ public final class MainActivity extends android.app.Activity {
         plus.setOnClickListener(v -> navigate("Workspace"));
         row.addView(plus, lp(48, 48));
         composer = new EditText(this);
-        composer.setHint("Ask CARAVEL anything…");
+        composer.setHint("Ask Bubblie anything…");
         composer.setHintTextColor(MUTED);
         composer.setTextColor(TEXT);
         composer.setTextSize(14);
         composer.setSingleLine(false);
         composer.setMaxLines(4);
+        composer.setText(agentDraft);
+        composer.setSelection(composer.length());
         composer.setPadding(dp(16), dp(7), dp(12), dp(7));
         composer.setBackground(round(PANEL_2, 28, BORDER));
         row.addView(composer, new LinearLayout.LayoutParams(0, dp(52), 1));
@@ -314,6 +385,7 @@ public final class MainActivity extends android.app.Activity {
             return;
         }
         composer.setText("");
+        agentDraft = "";
         chatHistory.add(new GatewayClient.Message("user", prompt));
         addActivity("You", prompt, "completed");
         addActivity("Agent", "Request submitted to Hermes Gateway", "running");
@@ -397,7 +469,7 @@ public final class MainActivity extends android.app.Activity {
     private void showWorkspace(File directory) {
         destination = "Workspace";
         selectNav("Workspace");
-        File rootDir = new File(getFilesDir(), "caravel/workspace");
+        File rootDir = new File(getFilesDir(), "bubblie/workspace");
         try {
             if (!directory.getCanonicalPath().startsWith(rootDir.getCanonicalPath())) directory = rootDir;
         } catch (Exception ignored) { directory = rootDir; }
@@ -481,81 +553,97 @@ public final class MainActivity extends android.app.Activity {
             }).show();
     }
 
+    private final TerminalSession.Listener terminalListener = new TerminalSession.Listener() {
+        @Override public void onOutput(String value) { runOnUiThread(() -> appendTerminal(value)); }
+        @Override public void onState(String state) { runOnUiThread(() -> refreshTerminalState(state)); }
+    };
+
     private void showTerminal() {
         destination = "Terminal";
         selectNav("Terminal");
         content.removeAllViews();
-        LinearLayout page = vertical(12, 10, 12, 10);
-        page.addView(pageTitle("Terminal", "Ubuntu ARM64 · /root/workspace"));
-        ScrollView outputScroll = new ScrollView(this);
-        terminalOutput = text("", 12, Color.rgb(194, 237, 221), false);
+        terminalSession.removeListener(terminalListener);
+        terminalSession.addListener(terminalListener);
+        LinearLayout page = vertical(12, 10, 12, 8);
+        page.addView(pageTitle("Terminal", "Ubuntu ARM64 · PTY when util-linux script is available · " + terminalSession.state()));
+        terminalScroll = new ScrollView(this);
+        terminalScroll.setFillViewport(true);
+        terminalOutput = text(terminalSession.scrollback(), 12, Color.rgb(194, 237, 221), false);
         terminalOutput.setTypeface(Typeface.MONOSPACE);
         terminalOutput.setTextIsSelectable(true);
         terminalOutput.setPadding(dp(12), dp(12), dp(12), dp(12));
         terminalOutput.setBackground(round(Color.rgb(3, 13, 18), 12, BORDER));
-        outputScroll.addView(terminalOutput);
-        page.addView(outputScroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        LinearLayout command = horizontal(0, 8, 0, 0);
+        terminalScroll.addView(terminalOutput);
+        page.addView(terminalScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout controls = horizontal(0, 6, 0, 0);
+        Button history = smallButton("↑ History");
+        Button interrupt = smallButton("Ctrl+C");
+        Button restart = smallButton("Restart");
+        controls.addView(history, new LinearLayout.LayoutParams(0, dp(42), 1));
+        controls.addView(interrupt, margins(0, 42, 6, 0, 0, 0)); ((LinearLayout.LayoutParams)interrupt.getLayoutParams()).weight = 1;
+        controls.addView(restart, margins(0, 42, 6, 0, 0, 0)); ((LinearLayout.LayoutParams)restart.getLayoutParams()).weight = 1;
+        page.addView(controls);
+        LinearLayout command = horizontal(0, 6, 0, 0);
         EditText input = new EditText(this);
         input.setSingleLine(true); input.setTextColor(TEXT); input.setHintTextColor(MUTED);
-        input.setHint(ubuntu.isInstalled() ? "Enter a Linux command" : "Ubuntu is not ready");
+        input.setHint(ubuntu.isInstalled() ? "Type a shell command" : "Ubuntu is not installed");
         input.setTypeface(Typeface.MONOSPACE); input.setBackground(round(PANEL_2, 10, BORDER));
         input.setPadding(dp(12), 0, dp(12), 0); input.setEnabled(ubuntu.isInstalled());
         command.addView(input, new LinearLayout.LayoutParams(0, dp(50), 1));
-        Button run = actionButton("Run", BLUE); run.setEnabled(ubuntu.isInstalled());
-        command.addView(run, margins(dp(72), dp(50), 8, 0, 0, 0));
-        run.setOnClickListener(v -> submitTerminal(input));
+        Button send = actionButton("↵", BLUE); send.setEnabled(ubuntu.isInstalled());
+        command.addView(send, margins(dp(56), dp(50), 8, 0, 0, 0));
+        send.setOnClickListener(v -> submitTerminal(input));
         input.setOnEditorActionListener((v, action, event) -> { submitTerminal(input); return true; });
+        history.setOnClickListener(v -> {
+            if (terminalHistory.isEmpty()) return;
+            terminalHistoryIndex = Math.max(0, terminalHistoryIndex - 1);
+            input.setText(terminalHistory.get(terminalHistoryIndex)); input.setSelection(input.length());
+        });
+        interrupt.setOnClickListener(v -> { try { terminalSession.interrupt(); } catch (Exception error) { toast(safeMessage(error)); } });
+        restart.setOnClickListener(v -> { if (ubuntu.isInstalled()) terminalSession.restart(); });
         page.addView(command);
         content.addView(page, matchMatch());
-        if (terminalProcess == null || !terminalProcess.isAlive()) startTerminal();
-        else terminalOutput.setText("Session is active.\n");
-    }
-
-    private synchronized void startTerminal() {
-        if (!ubuntu.isInstalled()) { if (terminalOutput != null) terminalOutput.setText("Ubuntu installation is not complete.\n"); return; }
-        if (terminalProcess != null && terminalProcess.isAlive()) return;
-        appendTerminal("Starting real PRoot shell…\n");
-        io.execute(() -> {
-            try {
-                List<String> binds = new ArrayList<>();
-                binds.add(new File(getFilesDir(), "caravel/workspace").getAbsolutePath() + ":/root/workspace");
-                terminalProcess = new PrCliRuntime(this).runInDistro("ubuntu", "cd /root/workspace && exec /bin/bash -l", binds);
-                terminalInput = new PrintWriter(new OutputStreamWriter(terminalProcess.getOutputStream(), StandardCharsets.UTF_8), true);
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(terminalProcess.getInputStream(), StandardCharsets.UTF_8))) {
-                    String line; while ((line = reader.readLine()) != null) appendTerminal(line + "\n");
-                }
-                int exit = terminalProcess.waitFor(); appendTerminal("\n[Shell exited " + exit + "]\n");
-            } catch (Exception e) { appendTerminal("Terminal failed: " + safeMessage(e) + "\n"); }
-        });
+        terminalScroll.post(() -> terminalScroll.fullScroll(View.FOCUS_DOWN));
+        if (ubuntu.isInstalled() && !terminalSession.isRunning()) terminalSession.start();
     }
 
     private void submitTerminal(EditText input) {
-        String command = input.getText().toString().trim();
-        if (command.isEmpty()) return;
-        input.setText(""); appendTerminal("root@caravel:~/workspace# " + command + "\n");
-        PrintWriter writer = terminalInput;
-        if (writer == null || terminalProcess == null || !terminalProcess.isAlive()) {
-            appendTerminal("Shell is starting; try again.\n"); startTerminal(); return;
-        }
-        writer.println(command); writer.flush();
-        addActivity("Terminal", command, "running");
+        String command = input.getText().toString();
+        if (command.trim().isEmpty()) return;
+        try {
+            terminalSession.writeLine(command);
+            terminalHistory.add(command); terminalHistoryIndex = terminalHistory.size();
+            input.setText("");
+        } catch (Exception error) { toast(safeMessage(error)); }
     }
 
     private void appendTerminal(String value) {
-        runOnUiThread(() -> { if (terminalOutput != null) terminalOutput.append(value); });
+        if (terminalOutput != null && "Terminal".equals(destination)) {
+            terminalOutput.append(value);
+            if (terminalScroll != null) terminalScroll.post(() -> terminalScroll.fullScroll(View.FOCUS_DOWN));
+        }
     }
 
-    private void showTools() {
-        destination = "Tools"; selectNav("Tools"); content.removeAllViews();
+    private void refreshTerminalState(String state) {
+        if ("Terminal".equals(destination) && content != null) {
+            // Keep output in place; state changes are real and also visible in Dashboard after refresh.
+            if ("Failed".equals(state)) toast("Terminal session failed. Use Restart after checking Ubuntu.");
+        }
+    }
+
+    private void showDashboard() {
+        destination = "Dashboard"; selectNav("Dashboard"); content.removeAllViews();
         LinearLayout page = vertical(16, 10, 16, 10);
-        page.addView(pageTitle("Tools", "Truthful runtime capabilities and services"));
+        page.addView(pageTitle("Dashboard", "Truthful runtime capabilities and services"));
         page.addView(toolRow("Hermes Gateway", gatewayReady ? "Connected · localhost:8642" : "Offline", gatewayReady));
         page.addView(toolRow("Ubuntu / PRoot", ubuntu.isInstalled() ? "Ready · ARM64 userspace" : "Not installed", ubuntu.isInstalled()));
         HermesManager.Layer edition = hermes.installedLayer();
         page.addView(toolRow("Agent runtime", edition == null ? "Not installed" : edition.name() + " edition", edition != null));
-        page.addView(toolRow("Provider", provider.isConfigured() ? provider.model() : "Not configured", provider.isConfigured()));
-        page.addView(toolRow("Workspace bridge", workspaceDirectory.getAbsolutePath() + " ↔ /root/workspace", true));
+        page.addView(toolRow("Provider / model", provider.isConfigured()
+            ? provider.model() + (gatewayReady ? " · gateway health verified" : " · saved, not connected")
+            : "Not configured", gatewayReady));
+        page.addView(toolRow("Terminal session", terminalSession.state(), terminalSession.isRunning()));
+        page.addView(toolRow("Workspace bridge", workspaceDirectory.getAbsolutePath() + " ↔ /root/workspace", workspaceDirectory.isDirectory()));
         Button dashboard = actionButton("Open Hermes Dashboard", BLUE);
         dashboard.setEnabled(hermes.isInstalled());
         dashboard.setOnClickListener(v -> startActivity(new Intent(this, DashboardActivity.class)));
@@ -600,7 +688,19 @@ public final class MainActivity extends android.app.Activity {
         page.addView(test, margins(-1, 52, 0, 10, 0, 0));
         Button edition = actionButton("Change Hermes edition", PANEL_2);
         edition.setOnClickListener(v -> chooseEdition()); page.addView(edition, margins(-1, 52, 0, 10, 0, 0));
-        TextView security = text("Security boundary\nThe agent runs inside the Ubuntu PRoot userspace. Only the CARAVEL workspace is explicitly bound into Linux; Android permissions and private storage remain enforced.", 12, MUTED, false);
+        page.addView(sectionTitle("Backup & Restore", null));
+        TextView backupNote = text("Exports a versioned Hermes configuration archive. API keys are excluded and must be re-entered after restore.", 12, MUTED, false);
+        page.addView(backupNote, margins(-1, -2, 0, 0, 0, 8));
+        LinearLayout backupActions = horizontal(0, 0, 0, 0);
+        Button backUp = actionButton("Back Up", BLUE);
+        backUp.setOnClickListener(v -> beginBackup());
+        backupActions.addView(backUp, new LinearLayout.LayoutParams(0, dp(50), 1));
+        Button restore = actionButton("Restore", PANEL_2);
+        restore.setOnClickListener(v -> beginRestore());
+        backupActions.addView(restore, margins(0, 50, 8, 0, 0, 0));
+        ((LinearLayout.LayoutParams)restore.getLayoutParams()).weight = 1;
+        page.addView(backupActions);
+        TextView security = text("Security boundary\nThe agent runs inside the Ubuntu PRoot userspace. Only the Bubblie workspace is explicitly bound into Linux; Android permissions and private storage remain enforced.", 12, MUTED, false);
         security.setPadding(dp(14), dp(14), dp(14), dp(14)); security.setBackground(round(PANEL, 12, BORDER));
         page.addView(security, margins(-1, -2, 0, 18, 0, 0));
         scroll.addView(page); content.addView(scroll, matchMatch());
@@ -630,17 +730,109 @@ public final class MainActivity extends android.app.Activity {
     }
 
     private void chooseEdition() {
-        String[] names = {"Lite · core agent", "Standard · broader tools", "Full · complete bundle"};
+        String[] names = {
+            "Lite · " + formatBytes(HermesManager.Layer.LITE.downloadBytes),
+            "Standard · " + formatBytes(HermesManager.Layer.STANDARD.downloadBytes),
+            "Full · " + formatBytes(HermesManager.Layer.FULL.downloadBytes)
+        };
         HermesManager.Layer current = hermes.getSelectedLayer(); int selected = current == null ? 0 : current.ordinal();
         final int[] choice = {selected};
         new AlertDialog.Builder(this).setTitle("Choose Hermes edition")
+            .setMessage("These are the verified release archive sizes. Ubuntu is also required and is installed only after confirmation.")
             .setSingleChoiceItems(names, selected, (d, which) -> choice[0] = which)
-            .setNegativeButton("Cancel", null).setPositiveButton("Install selected", (d, w) -> {
+            .setNegativeButton("Cancel", null).setPositiveButton("Use edition", (d, w) -> {
                 HermesManager.Layer layer = HermesManager.Layer.values()[choice[0]];
-                if (hermes.installedLayer() == layer) { toast(layer.name() + " is already installed"); return; }
                 hermes.setSelectedLayer(layer);
-                addActivity("Installer", "Selected " + layer.name() + " edition", "running");
-                serviceAction(RuntimeService.ACTION_INSTALL_HERMES);
+                addActivity("Installer", "Selected " + editionLabel(layer) + "; waiting for confirmation", "completed");
+                showAgent();
+            }).show();
+    }
+
+    private void beginBackup() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType(BackupManager.MIME)
+            .putExtra(Intent.EXTRA_TITLE, BackupManager.DEFAULT_NAME);
+        startActivityForResult(intent, REQUEST_BACKUP);
+    }
+
+    private void beginRestore() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*");
+        startActivityForResult(intent, REQUEST_RESTORE);
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        if (requestCode == REQUEST_BACKUP) {
+            io.execute(() -> {
+                try { String result = backupManager.backup(uri); runOnUiThread(() -> toast(result)); }
+                catch (Exception error) { runOnUiThread(() -> toast("Backup failed: " + safeMessage(error))); }
+            });
+        } else if (requestCode == REQUEST_RESTORE) {
+            io.execute(() -> {
+                try {
+                    BackupManager.Preview preview = backupManager.inspect(uri);
+                    runOnUiThread(() -> new AlertDialog.Builder(this)
+                        .setTitle("Restore configuration?")
+                        .setMessage("Hermes release: " + preview.hermesRelease + "\nConfiguration: " +
+                            (preview.hasConfig ? "included" : "not included") +
+                            "\n\nAPI keys are not contained in Bubblie backups. Your current configuration is safety-copied before replacement.")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Restore", (dialog, which) -> io.execute(() -> {
+                            try { String result = backupManager.restore(preview); runOnUiThread(() -> { toast(result); showSettings(); }); }
+                            catch (Exception error) { runOnUiThread(() -> toast("Restore failed: " + safeMessage(error))); }
+                        })).show());
+                } catch (Exception error) { runOnUiThread(() -> toast("Invalid backup: " + safeMessage(error))); }
+            });
+        }
+    }
+
+    private void showOverflowMenu(View anchor) {
+        PopupMenu popup = new PopupMenu(this, anchor);
+        popup.getMenu().add("Run in Background");
+        popup.getMenu().add("About Architecture");
+        popup.getMenu().add("Exit");
+        popup.setOnMenuItemClickListener(item -> {
+            String title = item.getTitle().toString();
+            if ("Run in Background".equals(title)) {
+                if (!hermes.isInstalled()) toast("No installed agent runtime is available for background execution.");
+                else { serviceAction(null); toast("Bubblie runtime is foreground-managed with a visible notification."); }
+            } else if ("About Architecture".equals(title)) {
+                showArchitecture();
+            } else if ("Exit".equals(title)) {
+                confirmExit();
+            }
+            return true;
+        });
+        popup.show();
+    }
+
+    private void showArchitecture() {
+        String edition = hermes.installedLayer() == null ? "not installed" : editionLabel(hermes.installedLayer());
+        new AlertDialog.Builder(this).setTitle("Bubblie architecture")
+            .setMessage("Android host\nBubblie owns the UI, encrypted provider preferences, installer service, and private app sandbox.\n\n" +
+                "Linux runtime\nUbuntu ARM64 runs through PRoot without device root. Hermes " + edition +
+                " runs inside that userspace. /root/workspace is the only explicit shared workspace bind.\n\n" +
+                "Networking and credentials\nThe Android UI talks to the authenticated Hermes Gateway on 127.0.0.1. Provider API keys are sealed with Android Keystore and are excluded from backups.\n\n" +
+                "Background work\nRuntime and installation work use an Android 15 foreground service and a user-visible notification. Android may still terminate the app process under platform policy.")
+            .setPositiveButton("Close", null).show();
+    }
+
+    private void confirmExit() {
+        boolean installation = getSharedPreferences("bubblie_installer", MODE_PRIVATE).getBoolean("running", false);
+        boolean shell = terminalSession.isRunning();
+        String message = (installation ? "An installation is running. " : "") +
+            (shell ? "The terminal shell will stop. " : "") +
+            "The runtime service will stop, but installed files and settings will remain.";
+        new AlertDialog.Builder(this).setTitle("Exit Bubblie?").setMessage(message)
+            .setNegativeButton("Cancel", null).setPositiveButton("Stop and exit", (dialog, which) -> {
+                terminalSession.stop();
+                stopService(new Intent(this, RuntimeService.class));
+                finishAndRemoveTask();
             }).show();
     }
 
@@ -651,7 +843,7 @@ public final class MainActivity extends android.app.Activity {
             runOnUiThread(() -> {
                 boolean changed = gatewayReady != ready; gatewayReady = ready; refreshHeader();
                 if (changed && ready) addActivity("Runtime", "Hermes Gateway health check passed", "completed");
-                if ("Agent".equals(destination)) showAgent(); else if ("Tools".equals(destination)) showTools();
+                if ("Agent".equals(destination)) showAgent(); else if ("Dashboard".equals(destination)) showDashboard();
             });
         });
     }
@@ -683,11 +875,15 @@ public final class MainActivity extends android.app.Activity {
     }
 
     private void applyInsets() {
-        if (Build.VERSION.SDK_INT >= 35) {
+        if (Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
             root.setOnApplyWindowInsetsListener((view, insets) -> {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                android.graphics.Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                boolean keyboard = insets.isVisible(WindowInsets.Type.ime());
+                view.setPadding(bars.left, bars.top, bars.right,
+                    keyboard ? Math.max(bars.bottom, ime.bottom) : bars.bottom);
+                if (navigationShell != null) navigationShell.setVisibility(keyboard ? View.GONE : View.VISIBLE);
                 return insets;
             });
         }
@@ -695,8 +891,8 @@ public final class MainActivity extends android.app.Activity {
 
     @Override protected void onDestroy() {
         if (receiverRegistered) unregisterReceiver(statusReceiver);
-        // Keep the foreground runtime alive. The interactive shell belongs to this activity only.
-        if (terminalProcess != null) terminalProcess.destroy();
+        terminalSession.removeListener(terminalListener);
+        // Destination changes and activity recreation do not stop the retained shell.
         io.shutdownNow();
         super.onDestroy();
     }
@@ -725,7 +921,7 @@ public final class MainActivity extends android.app.Activity {
     private FrameLayout.LayoutParams frameBottom(int height, int horizontal, int bottom) { FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-1, dp(height), Gravity.BOTTOM); p.leftMargin = dp(horizontal); p.rightMargin = dp(horizontal); p.bottomMargin = dp(bottom); return p; }
     private LinearLayout.LayoutParams margins(int w, int h, int l, int t, int r, int b) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(w < 0 ? w : dp(w), h < 0 ? h : dp(h)); p.setMargins(dp(l), dp(t), dp(r), dp(b)); return p; }
     private <T extends View> T withMargins(T view, int l, int t, int r, int b) { view.setLayoutParams(margins(-1, -2, l, t, r, b)); return view; }
-    private void selectNav(String name) { for (TextView nav : navViews) { boolean active = name.equals(nav.getTag()); nav.setTextColor(active ? ("Agent".equals(name) ? TEAL : BLUE) : MUTED); nav.setTypeface(Typeface.DEFAULT, active ? Typeface.BOLD : Typeface.NORMAL); } }
+    private void selectNav(String name) { for (TextView nav : navViews) { boolean active = name.equals(nav.getTag()); nav.setTextColor(active ? TEAL : MUTED); nav.setTypeface(Typeface.DEFAULT, active ? Typeface.BOLD : Typeface.NORMAL); nav.setBackground(active ? round(Color.rgb(12, 53, 57), 16, 0) : null); } }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private void toast(String value) { Toast.makeText(this, value, Toast.LENGTH_LONG).show(); }
     private static String safeMessage(Throwable error) { String value = error.getMessage(); return value == null || value.trim().isEmpty() ? error.getClass().getSimpleName() : value; }

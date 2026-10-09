@@ -1,0 +1,40 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'org.caravel.bubblie'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'org.caravel.bubblie'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    buildTypes {
+        debug {
+            versionNameSuffix "-debug"
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+        }
+    }
+
+    sourceSets {
+        main {
+            // CI produces the pinned ARM64 runtime payload for CARAVEL once;
+            // Bubblie packages the same audited binaries under its own app sandbox.
+            jniLibs.srcDirs = ['../app/src/main/jniLibs']
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging false
+        }
+    }
+}
