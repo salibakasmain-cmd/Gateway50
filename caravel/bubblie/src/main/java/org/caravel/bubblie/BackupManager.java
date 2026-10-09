@@ -75,6 +75,14 @@ public final class BackupManager {
             if (safety.isFile()) copy(safety, target);
             throw new IOException("Unable to finalize restored configuration");
         }
+        try {
+            ProviderStore.getInstance(context).restoreNonSecretConfiguration(
+                new String(config, StandardCharsets.UTF_8));
+        } catch (Exception invalid) {
+            target.delete();
+            if (safety.isFile()) copy(safety, target);
+            throw new IOException("Restored configuration is incompatible: " + invalid.getMessage(), invalid);
+        }
         return "Configuration restored. Re-enter the provider API key in Settings, then restart the agent.";
     }
 

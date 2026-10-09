@@ -566,9 +566,7 @@ public final class RuntimeService extends Service {
         );
 
         return new Notification.Builder(this, CHANNEL)
-            .setSmallIcon(
-                android.R.drawable.stat_sys_download_done
-            )
+            .setSmallIcon(R.drawable.ic_stat_bubblie)
             .setContentTitle("Bubblie runtime")
             .setContentText(message)
             .setContentIntent(pending)
@@ -600,6 +598,16 @@ public final class RuntimeService extends Service {
 
     @Override
     public void onDestroy() {
+        if (installationRunning.get() || ubuntuInstalling.get() || hermesInstalling.get()) {
+            getSharedPreferences("bubblie_installer", MODE_PRIVATE).edit()
+                .putBoolean("running", false)
+                .putInt("percent", -1)
+                .putString("message", "Installation stopped before completion; retry is safe")
+                .apply();
+        }
+        installationRunning.set(false);
+        ubuntuInstalling.set(false);
+        hermesInstalling.set(false);
         Process dashboard = dashboardProcess;
         dashboardProcess = null;
 

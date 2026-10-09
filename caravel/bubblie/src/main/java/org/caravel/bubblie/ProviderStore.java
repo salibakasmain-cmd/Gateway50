@@ -94,14 +94,14 @@ public final class ProviderStore {
             "  provider: " + yamlQuote(provider) + "\n" +
             "  default: " + yamlQuote(model) + "\n" +
             "  base_url: " + yamlQuote(baseUrl) + "\n" +
-            "  api_key: \"${Bubblie_PROVIDER_API_KEY}\"\n" +
+            "  api_key: \"${BUBBLIE_PROVIDER_API_KEY}\"\n" +
             "  api_mode: " + yamlQuote(apiMode) + "\n");
 
         File env = new File(home, ".env");
         String existing = env.isFile()
             ? new String(java.nio.file.Files.readAllBytes(env.toPath()), StandardCharsets.UTF_8)
             : "";
-        writeFile(env, upsert(existing, "Bubblie_PROVIDER_API_KEY", apiKey));
+        writeFile(env, upsert(existing, "BUBBLIE_PROVIDER_API_KEY", apiKey));
     }
 
     public synchronized String model() {
@@ -133,6 +133,38 @@ public final class ProviderStore {
             throw new IllegalStateException("Provider test failed (HTTP " + code + ")");
         } finally {
             connection.disconnect();
+        }
+    }
+
+    /** Restores only non-secret fields from Bubblie's own generated YAML. */
+    public synchronized void restoreNonSecretConfiguration(String yaml) {
+        String provider = yamlValue(yaml, "provider");
+        String model = yamlValue(yaml, "default");
+        String baseUrl = yamlValue(yaml, "base_url");
+        String apiMode = normalizeApiMode(yamlValue(yaml, "api_mode"));
+        if (provider.isEmpty() || model.isEmpty() || baseUrl.isEmpty()) {
+            throw new IllegalArgumentException("Backup configuration is missing required provider fields");
+        }
+        prefs.edit()
+            .putString(FIELD_PROVIDER, provider)
+            .putString(FIELD_MODEL, model)
+            .putString(FIELD_BASE_URL, normalizeBaseUrl(baseUrl))
+            .putString(FIELD_API_MODE, apiMode)
+            .remove(FIELD_KEY_CIPHER)
+            .remove(FIELD_KEY_IV)
+            .apply();
+        File env = new File(context.getFilesDir(), "bubblie/hermes/home/.env");
+        if (env.isFile()) {
+            try {
+                String content = new String(java.nio.file.Files.readAllBytes(env.toPath()), StandardCharsets.UTF_8);
+                StringBuilder safe = new StringBuilder();
+                for (String line : content.replace("\r", "").split("\n")) {
+                    if (!line.startsWith("BUBBLIE_PROVIDER_API_KEY=")) safe.append(line).append('\n');
+                }
+                writeFile(env, safe.toString());
+            } catch (Exception error) {
+                throw new IllegalStateException("Unable to clear the previous provider secret", error);
+            }
         }
     }
 
@@ -191,6 +223,20 @@ public final class ProviderStore {
             .setRandomizedEncryptionRequired(true)
             .build());
         return generator.generateKey();
+    }
+
+    private static String yamlValue(String yaml, String key) {
+        for (String line : yaml.replace("\r", "").split("\n")) {
+            String trimmed = line.trim();
+            if (!trimmed.startsWith(key + ":")) continue;
+            String value = trimmed.substring(key.length() + 1).trim();
+            if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+                value = value.substring(1, value.length() - 1)
+                    .replace("\\\"", "\"").replace("\\\\", "\\");
+            }
+            return value;
+        }
+        return "";
     }
 
     private static String normalizeApiMode(String value) {

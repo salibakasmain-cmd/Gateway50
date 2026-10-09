@@ -614,7 +614,6 @@ public final class MainActivity extends android.app.Activity {
             terminalSession.writeLine(command);
             terminalHistory.add(command); terminalHistoryIndex = terminalHistory.size();
             input.setText("");
-            addActivity("Terminal", "Command sent to Ubuntu shell", "completed");
         } catch (Exception error) { toast(safeMessage(error)); }
     }
 
@@ -640,8 +639,11 @@ public final class MainActivity extends android.app.Activity {
         page.addView(toolRow("Ubuntu / PRoot", ubuntu.isInstalled() ? "Ready · ARM64 userspace" : "Not installed", ubuntu.isInstalled()));
         HermesManager.Layer edition = hermes.installedLayer();
         page.addView(toolRow("Agent runtime", edition == null ? "Not installed" : edition.name() + " edition", edition != null));
-        page.addView(toolRow("Provider", provider.isConfigured() ? provider.model() : "Not configured", provider.isConfigured()));
-        page.addView(toolRow("Workspace bridge", workspaceDirectory.getAbsolutePath() + " ↔ /root/workspace", true));
+        page.addView(toolRow("Provider / model", provider.isConfigured()
+            ? provider.model() + (gatewayReady ? " · gateway health verified" : " · saved, not connected")
+            : "Not configured", gatewayReady));
+        page.addView(toolRow("Terminal session", terminalSession.state(), terminalSession.isRunning()));
+        page.addView(toolRow("Workspace bridge", workspaceDirectory.getAbsolutePath() + " ↔ /root/workspace", workspaceDirectory.isDirectory()));
         Button dashboard = actionButton("Open Hermes Dashboard", BLUE);
         dashboard.setEnabled(hermes.isInstalled());
         dashboard.setOnClickListener(v -> startActivity(new Intent(this, DashboardActivity.class)));
