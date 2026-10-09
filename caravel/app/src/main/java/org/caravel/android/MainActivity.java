@@ -89,6 +89,7 @@ public final class MainActivity extends android.app.Activity {
             if (message == null || message.trim().isEmpty()) return;
             String detail = percent > 0 && percent < 100 ? message + " · " + percent + "%" : message;
             addActivity("Runtime", detail, percent < 0 ? "failed" : percent == 100 ? "completed" : "running");
+            if (message.startsWith("Hermes Gateway ready")) probeGateway();
             refreshHeader();
             if ("Agent".equals(destination)) showAgent();
         }
@@ -610,6 +611,7 @@ public final class MainActivity extends android.app.Activity {
         try {
             provider.saveCustomProvider(model.getText().toString(), base.getText().toString(), secret, mode.getText().toString());
             key.setText(""); addActivity("Settings", "Provider saved securely", "completed");
+            gatewayReady = false;
             serviceAction(RuntimeService.ACTION_RESTART_GATEWAY); toast("Saved. Agent runtime is restarting.");
             probeGatewayDelayed();
         } catch (Exception e) { toast(safeMessage(e)); }

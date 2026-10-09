@@ -39,6 +39,7 @@ public final class RuntimeService extends Service {
     private HermesManager hermesManager;
 
     private volatile Process gatewayProcess;
+    private volatile Process intentionallyStoppedGateway;
     private volatile Process dashboardProcess;
 
     private Thread gatewayLogThread;
@@ -193,18 +194,22 @@ public final class RuntimeService extends Service {
     }
 
     private synchronized void restartGateway() {
-        if (gatewayProcess != null && gatewayProcess.isAlive()) {
+        Process previous = gatewayProcess;
+        if (previous != null && previous.isAlive()) {
             sendStatus("Restarting Hermes Gateway with updated provider", 0);
-            gatewayProcess.destroy();
+            intentionallyStoppedGateway = previous;
+            previous.destroy();
             try {
-                if (!gatewayProcess.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
-                    gatewayProcess.destroyForcibly();
+                if (!previous.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    previous.destroyForcibly();
+                    previous.waitFor(2, java.util.concurrent.TimeUnit.SECONDS);
                 }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             }
-            gatewayProcess = null;
+            if (gatewayProcess == previous) gatewayProcess = null;
         }
+        gatewayStarting.set(false);
         startBackend();
     }
 
@@ -311,6 +316,8 @@ public final class RuntimeService extends Service {
 
                 Process process = hermesManager.startGateway();
                 gatewayProcess = process;
+                // The process is now owned; future calls de-duplicate via isAlive().
+                gatewayStarting.set(false);
 
                 gatewayLogThread = new Thread(
                     () -> drainProcess("Gateway", process),
@@ -321,9 +328,11 @@ public final class RuntimeService extends Service {
                 waitForGatewayThenDashboard();
 
                 int exit = process.waitFor();
-                gatewayProcess = null;
+                if (gatewayProcess == process) gatewayProcess = null;
 
-                if (exit != 0) {
+                if (intentionallyStoppedGateway == process) {
+                    intentionallyStoppedGateway = null;
+                } else if (exit != 0) {
                     sendStatus(
                         "Hermes Gateway exited with code " + exit,
                         -1
