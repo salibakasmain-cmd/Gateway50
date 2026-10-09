@@ -168,9 +168,9 @@ jobs:
         with:
           gradle-version: "8.10"
 
-      - name: Build CARAVEL
+      - name: Build CARAVEL and Bubblie
         working-directory: caravel
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: gradle :app:assembleDebug :bubblie:assembleDebug --no-daemon --stacktrace
 
       - name: Verify CARAVEL runtime payload
         id: verify_apk
@@ -192,9 +192,36 @@ jobs:
           echo "apk_bytes=$APK_BYTES" >> "$GITHUB_OUTPUT"
           echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK
+      - name: Verify Bubblie identity and runtime payload
+        id: verify_bubblie_apk
+        working-directory: caravel
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="bubblie/build/outputs/apk/debug/bubblie-debug.apk"
+          test -s "$APK"
+          for lib in libbusybox.so libpr-cli.so libproot.so libproot-loader.so libcaravel_7z_jni.so lib7z.so libc++_shared.so; do
+            unzip -l "$APK" | grep -q "lib/arm64-v8a/$lib"
+          done
+          unzip -p "$APK" classes.dex | strings | grep -q "org/caravel/bubblie/MainActivity"
+          ! unzip -p "$APK" classes.dex | strings | grep -q "org/caravel/android/MainActivity"
+          APK_BYTES="$(stat -c '%s' "$APK")"
+          APK_SHA256="$(sha256sum "$APK" | cut -d' ' -f1)"
+          echo "$APK_BYTES bytes"
+          echo "$APK_SHA256  $APK"
+          echo "apk_bytes=$APK_BYTES" >> "$GITHUB_OUTPUT"
+          echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload CARAVEL APK
         uses: actions/upload-artifact@v4
         with:
           name: caravel-debug-${{ steps.verify_apk.outputs.apk_bytes }}-${{ steps.verify_apk.outputs.apk_sha256 }}
           path: caravel/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 3
+
+      - name: Upload Bubblie APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bubblie-debug-${{ steps.verify_bubblie_apk.outputs.apk_bytes }}-${{ steps.verify_bubblie_apk.outputs.apk_sha256 }}
+          path: caravel/bubblie/build/outputs/apk/debug/bubblie-debug.apk
+          retention-days: 7
