@@ -9,6 +9,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -52,7 +54,12 @@ public final class ProviderStore {
     ) throws Exception {
         String cleanModel = require(model, "model");
         String cleanBaseUrl = normalizeBaseUrl(require(baseUrl, "base URL"));
-        String cleanKey = require(apiKey, "API key");
+        String cleanKey;
+        if ((apiKey == null || apiKey.trim().isEmpty()) && isConfigured()) {
+            cleanKey = decryptKey();
+        } else {
+            cleanKey = require(apiKey, "API key");
+        }
         String cleanMode = normalizeApiMode(apiMode);
         byte[][] sealed = encrypt(cleanKey);
 
@@ -107,6 +114,26 @@ public final class ProviderStore {
 
     public synchronized String apiMode() {
         return prefs.getString(FIELD_API_MODE, "chat_completions");
+    }
+
+    /** Authenticated provider probe. The decrypted key never leaves this method except on TLS. */
+    public synchronized String testConnection() throws Exception {
+        if (!isConfigured()) throw new IllegalStateException("Provider is not configured");
+        String root = baseUrl();
+        String endpoint = root.endsWith("/v1") ? root + "/models" : root + "/models";
+        HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
+        connection.setConnectTimeout(8000);
+        connection.setReadTimeout(12000);
+        connection.setRequestProperty("Authorization", "Bearer " + decryptKey());
+        connection.setRequestProperty("Accept", "application/json");
+        try {
+            int code = connection.getResponseCode();
+            if (code >= 200 && code < 300) return "Provider authenticated (HTTP " + code + ")";
+            if (code == 401 || code == 403) throw new IllegalStateException("Provider rejected the API key (HTTP " + code + ")");
+            throw new IllegalStateException("Provider test failed (HTTP " + code + ")");
+        } finally {
+            connection.disconnect();
+        }
     }
 
     public synchronized void clear() {

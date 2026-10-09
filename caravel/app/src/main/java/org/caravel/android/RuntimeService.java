@@ -25,6 +25,8 @@ public final class RuntimeService extends Service {
         "org.caravel.android.action.INSTALL_HERMES";
     public static final String ACTION_START_BACKEND =
         "org.caravel.android.action.START_BACKEND";
+    public static final String ACTION_RESTART_GATEWAY =
+        "org.caravel.android.action.RESTART_GATEWAY";
     public static final String ACTION_STATUS =
         "org.caravel.android.action.STATUS";
     public static final String EXTRA_MESSAGE = "message";
@@ -95,6 +97,8 @@ public final class RuntimeService extends Service {
                 installHermes();
             } else if (ACTION_START_BACKEND.equals(action)) {
                 startBackend();
+            } else if (ACTION_RESTART_GATEWAY.equals(action)) {
+                restartGateway();
             } else {
                 ensureRuntimeProcesses();
             }
@@ -186,6 +190,22 @@ public final class RuntimeService extends Service {
                 hermesInstalling.set(false);
             }
         });
+    }
+
+    private synchronized void restartGateway() {
+        if (gatewayProcess != null && gatewayProcess.isAlive()) {
+            sendStatus("Restarting Hermes Gateway with updated provider", 0);
+            gatewayProcess.destroy();
+            try {
+                if (!gatewayProcess.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    gatewayProcess.destroyForcibly();
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            gatewayProcess = null;
+        }
+        startBackend();
     }
 
     private synchronized void startBackend() {

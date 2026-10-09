@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="caravel_bg">#041C1C</color>
-    <color name="caravel_panel">#0A2928</color>
-    <color name="caravel_panel_alt">#103332</color>
-    <color name="caravel_text">#FFE6CB</color>
-    <color name="caravel_muted">#B7A997</color>
-    <color name="caravel_accent">#FFBD38</color>
-    <color name="caravel_accent_dim">#304020</color>
-    <color name="caravel_ok">#69D18B</color>
+    <color name="caravel_bg">#060F18</color>
+    <color name="caravel_panel">#0B1B28</color>
+    <color name="caravel_panel_alt">#0E2332</color>
+    <color name="caravel_border">#1C3C4E</color>
+    <color name="caravel_text">#F0F6FC</color>
+    <color name="caravel_muted">#97AAC0</color>
+    <color name="caravel_accent">#17DACA</color>
+    <color name="caravel_blue">#2484FF</color>
+    <color name="caravel_ok">#24DA7E</color>
     <color name="caravel_warn">#F2B95E</color>
+    <color name="caravel_error">#FF6870</color>
 </resources>
